@@ -1,6 +1,6 @@
 #pragma once
 
-#include <thread_pool/mpmc_bounded_queue.hpp>
+#include <thread_pool/bounded_random_access_bag.hpp>
 
 #include <atomic>
 #include <thread>
@@ -11,140 +11,34 @@
 namespace tp
 {
 
-class SPMCBoundedRandomAccessBag
-{
-    struct Element
-    {
-        //
-        // State Machine:
-        //
-        //             +------- TryRemove() -------+-------------------------------+    +-- remove() --+
-        //             |                           |                               |    |              |
-        //             v                           |                               |    |              |
-        //       +-----------+              +-------------+                 +---------------+          |
-        //   +---| NotQueued | -- add() --> | QueuedValid | -- remove() --> | QueuedInvalid | <--------+
-        //   |   +-----------+              +-------------+                 +---------------+
-        //   |            ^                        ^                               |
-        //   |            |                        |                               |
-        //   +- remove() -+                        +------------- add() -----------+
-        //
-        enum class State
-        {
-            NotQueued,
-            QueuedValid,
-            QueuedInvalid,
-        };
-
-        std::atomic<State> m_state;
-        size_t m_id;
-
-        Element(size_t id)
-            : m_state(State::NotQueued)
-            , m_id(id)
-        {
-        }
-    };
-
-public:
-    SPMCBoundedRandomAccessBag(size_t size)
-        : m_queue(size)
-    {
-        m_entries.reserve(size);
-        for (auto i = 0u; i < size; i++)
-            m_entries.push_back(Element(i));
-    }
-
-    void add(size_t id)
-    {
-
-        switch(m_entries[id].m_state.load())
-        {
-            case Element::State::NotQueued:
-                // No race, single producer.
-                m_entries[id].m_state.store(Element::State::QueuedValid);
-                if (!m_queue.push(&m_entries[id]))
-                    throw std::exception("Internal Logic Error: The queue is full."); // This should never occur.
-                break;
-
-            case Element::State::QueuedValid:
-                throw std::exception("The item has already been added to the bag.");
-
-            case Element::State::QueuedInvalid:
-                auto state = Element::State::QueuedInvalid;
-                if (!m_entries[id].m_state.compare_exchange_strong(state, Element::State::QueuedValid))
-                {
-                    // Someone called TryRemoveAny, and our state had transitioned into NotQueued.
-                    // Since we are the only producer, it is safe to throw the object back in the queue.
-                    state = Element::State::NotQueued;
-                    if (m_entries[id].m_state.compare_exchange_strong(state, Element::State::QueuedValid))
-                    {
-                        if (!m_queue.push(&m_entries[id]))
-                            throw std::exception("Internal Logic Error: The queue is full."); // This should never occur.
-                    }
-                    else
-                        throw std::exception("Another producer has added the item. This violates single producer semantics.");
-                }
-                break;
-        }
-             
-    }
-
-    void remove(size_t id)
-    {
-        // This consumer action is solely responsible for an indiscriminant QueuedValid -> QueuedInvalid state transition.
-        auto state = Element::State::QueuedValid;
-        m_entries[id].m_state.compare_exchange_strong(state, Element::State::QueuedInvalid);
-    }
-
-    bool tryRemoveAny(size_t& id)
-    {
-        Element* element;
-        while (m_queue.pop(element))
-        {
-            // Once a consumer pops an element, they are the sole controller of that object's membership to the queue
-            // (i.e. they are solely responsible for the transition back into the NotQueued state) by virtue of the
-            // MPMCBoundedQueue's atomicity semantics.
-            // In other words, only one consumer can hold a popped element before it its state is set to NotQueued.
-            auto previous = element->m_state.exchange(Element::State::NotQueued);
-
-            switch (previous)
-            {
-            case Element::State::NotQueued:
-                throw std::exception("Internal Logic Error: State machine logic violation.");
-
-            case Element::State::QueuedValid:
-                id = element->m_id;
-                return true;
-
-            case Element::State::QueuedInvalid:
-                // Try again.
-                break;
-            }
-        }
-
-        // Queue empty.
-        return false;
-    }
-
-        
-
-private:
-    MPMCBoundedQueue<Element *> m_queue;
-    std::vector<Element> m_entries;
-};
-
 /**
 * @brief The Worker class owns task queue and executing thread.
 * In thread it tries to pop task from queue. If queue is empty then it tries
 * to steal task from the sibling worker. If steal was unsuccessful then spins
 * with one millisecond delay.
+* @details State Machine:
+*
+*             +---------------+---------------+
+*             |               |               |
+*             v               |               |
+*       +--------+       +----------+      +------+
+*    +--| Active | ----> | BusyWait | ---> | Idle |
+*    |  +--------+       +----------+      +------+
+*    |      ^
+*    |      |
+*    +------+
+*
 */
 template <typename Task, template<typename> class Queue>
 class Worker
 {
     using WorkerVector = std::vector<std::unique_ptr<Worker<Task, Queue>>>;
-    using IdleWorkerPtr = std::shared_ptr<std::atomic<Worker<Task, Queue>*>>;
-    using IdleWorkerQueue = MPMCBoundedQueue<IdleWorkerPtr>;
+    
+    
+
+    class WorkerStoppedException final : public std::exception
+    {
+    };
 
 public:
     
@@ -170,7 +64,7 @@ public:
     * @param id Worker ID.
     * @param workers Sibling workers for performing round robin work stealing.
     */
-    void start(size_t id, WorkerVector* workers, IdleWorkerQueue* idle_workers, std::atomic<size_t>* num_busy_waiters);
+    void start(size_t id, WorkerVector* workers, BoundedRandomAccessBag* idle_workers, std::atomic<size_t>* num_busy_waiters);
 
     /**
     * @brief stop Stop all worker's thread and stealing activity.
@@ -211,27 +105,41 @@ private:
     * @brief tryRoundRobinSteal Try stealing a thread from sibling workers in a round-robin fashion.
     * @param task Place for the obtained task to be stored.
     * @param workers Sibling workers for performing round robin work stealing.
+    * @return true upon success, false otherwise.
     */
     bool tryRoundRobinSteal(Task& task, WorkerVector* workers);
+
+    /**
+    * @brief tryHandleTask Try to obtain a work item and process it.
+    * @details This entails attempting to pop an item from the local queue, and if not successful,
+    * the worker will attempt to perform a round robin steal.
+    * @param task Place for the obtained task to be stored.
+    * @param workers Sibling workers for performing round robin work stealing.
+    * @return true upon success, false otherwise.
+    */
+    bool tryHandleTask(Task& task, WorkerVector* workers);
 
     /**
     * @brief threadFunc Executing thread function.
     * @param id Worker ID to be associated with this thread.
     * @param workers Sibling workers for performing round robin work stealing.
     */
-    void threadFunc(size_t id, WorkerVector* workers, IdleWorkerQueue* idle_workers, std::atomic<size_t>* num_busy_waiters);
+    void threadFunc(size_t id, WorkerVector* workers, BoundedRandomAccessBag* idle_workers, std::atomic<size_t>* num_busy_waiters);
 
     
+    // Constants.
+    const size_t m_num_busy_wait_iterations = 3;
+
+    // Members.
     Queue<Task> m_queue;
     std::atomic<bool> m_running_flag;
     std::thread m_thread;
     size_t m_next_donor;
-    const size_t m_num_busy_wait_iterations = 5;
-
-    std::mutex m_sleep_mutex;
-    std::condition_variable m_sleep_cv;
-    bool m_abort_sleep;
-    bool m_is_asleep;
+    bool m_is_idle;
+    bool m_abort_idle;
+    std::mutex m_idle_mutex;
+    std::condition_variable m_idle_cv;
+    
 };
 
 
@@ -251,9 +159,8 @@ inline Worker<Task, Queue>::Worker(size_t queue_size)
     : m_queue(queue_size)
     , m_running_flag(true)
     , m_next_donor(0) // Initialized in threadFunc.
-    , m_is_asleep(false)
-    , m_abort_sleep(false)
-    , m_sleep_queue_ptr(nullptr)
+    , m_is_idle(false)
+    , m_abort_idle(false)
 {
 }
 
@@ -271,6 +178,11 @@ inline Worker<Task, Queue>& Worker<Task, Queue>::operator=(Worker&& rhs) noexcep
         m_queue = std::move(rhs.m_queue);
         m_running_flag = rhs.m_running_flag.load();
         m_thread = std::move(rhs.m_thread);
+        m_next_donor = rhs.m_next_donor;
+        m_is_idle = rhs.m_is_idle;
+        m_abort_idle = rhs.m_is_idle;
+        m_idle_mutex = std::move(rhs.m_idle_mutex);
+        m_idle_cv = std::move(rhs.m_idle_cv);
     }
     return *this;
 }
@@ -278,12 +190,13 @@ inline Worker<Task, Queue>& Worker<Task, Queue>::operator=(Worker&& rhs) noexcep
 template <typename Task, template<typename> class Queue>
 inline void Worker<Task, Queue>::stop()
 {
-    m_running_flag.store(false, std::memory_order_relaxed);
+    m_running_flag.store(false);
+    wake();
     m_thread.join();
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::start(size_t id, WorkerVector* workers, IdleWorkerQueue* idle_workers, std::atomic<size_t>* num_busy_waiters)
+inline void Worker<Task, Queue>::start(size_t id, WorkerVector* workers, BoundedRandomAccessBag* idle_workers, std::atomic<size_t>* num_busy_waiters)
 {
     m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, workers, idle_workers, num_busy_waiters);
 }
@@ -297,12 +210,12 @@ inline size_t Worker<Task, Queue>::getWorkerIdForCurrentThread()
 template <typename Task, template<typename> class Queue>
 inline void Worker<Task, Queue>::wake()
 {
-    std::unique_lock<std::mutex> lock(m_sleep_mutex);
+    std::unique_lock<std::mutex> lock(m_idle_mutex);
 
-    m_abort_sleep = true;
+    m_abort_idle = true;
 
-    if (m_is_asleep)
-        m_sleep_cv.notify_one();
+    if (m_is_idle)
+        m_idle_cv.notify_one();
 }
 
 template <typename Task, template<typename> class Queue>
@@ -341,75 +254,104 @@ inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector* wo
     return false;
 }
 
+template <typename Task, template <typename> class Queue>
+bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector* workers)
+{
+    if (!m_running_flag.load())
+        throw WorkerStoppedException();
+
+    // Prioritize local queue, then try stealing from sibling workers.
+    if (tryGetLocalTask(task) || tryRoundRobinSteal(task, workers))
+    {
+        try
+        {
+            task();
+        }
+        catch (...)
+        {
+            // Suppress all exceptions.
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, IdleWorkerQueue* idle_workers, std::atomic<size_t>* num_busy_waiters)
+inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, BoundedRandomAccessBag* idle_workers, std::atomic<size_t>* num_busy_waiters)
 {
     *detail::thread_id() = id;
-    m_next_donor = ++id % workers->size();
-    auto idle_iterations = 0u;
-
+    m_next_donor = (id + 1) % workers->size();
     Task handler;
+    bool taskFound = false;
 
-    while (m_running_flag.load(std::memory_order_relaxed))
+    try
     {
-        // Prioritize local queue, then try stealing from sibling workers.
-        if (tryGetLocalTask(handler) || tryRoundRobinSteal(handler, workers))
+        while (true)
         {
-            idle_iterations = 0;
+            // By default, this loop operates in the active state. 
+            // We poll for items from our local task queue and try to steal from others.
+            if (tryHandleTask(handler, workers)) continue;
+
+            // We were unable to obtain a task. 
+            // We now transition into the busy wait state.
+            taskFound = false;
+            num_busy_waiters->fetch_add(1);
+
+            for (auto i = 0u; i < m_num_busy_wait_iterations && !taskFound; i++)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<size_t>(pow(2, i))));
+                taskFound = tryHandleTask(handler, workers);
+            }
+
+            // If we found a task during our busy wait sequence, we abort it and transition back into the active loop.
+            if (taskFound)
+            {
+                num_busy_waiters->fetch_add(-1);
+                continue;
+            }
+
+            // No tasks were found during the busy wait sequence. 
+            // We now transition into the idle state.
+            m_is_idle = false;
+            m_abort_idle = false;
+
+            // We put this worker up for grabs as a recipient to new posts in the thread pool.
+            idle_workers->add(id);
+
+            // We need to transition out of the busy wait state after we have submitted ourselves to the idle 
+            // worker queue in order to avoid a race.
             num_busy_waiters->fetch_add(-1);
 
-            try
+            // While we were adding this worker to the idle worker bag, a job may have been posted into this 
+            // worker's queue. We need to check for work again before initiating the deep sleep sequence, otherwise
+            // the given task may be lost. 
+            // Any further posts will flip the m_abort_idle flag to true, and we will catch them later.
+            if (tryHandleTask(handler, workers))
             {
-                handler();
+                // A task was indeed posted in the time it took this worker to enter the bag.
+                // We remove the worker from the bag, and transition to the active state.
+                idle_workers->remove(id);
+                continue;
             }
-            catch (...)
+
             {
-                // Suppress all exceptions.
-            }
-        }
-        else if (idle_iterations <= m_num_busy_wait_iterations)
-        {
-            if (idle_iterations == 0)
-                num_busy_waiters->fetch_add(1);
-            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<size_t>(pow(2, idle_iterations))));
-            idle_iterations++;
-            
-        }
-        else
-        {
-            m_is_asleep = false;
-            m_abort_sleep = false;
-            idle_iterations = 0;
+                std::unique_lock<std::mutex> lock(m_idle_mutex);
 
-            if (!idle_workers->push(&m_idle_queue_entry))
-                throw std::exception("Idle worker queue is full."); // This should never occur.
-
-            num_busy_waiters->fetch_add(-1);
-
-            if (tryGetLocalTask(handler) || tryRoundRobinSteal(handler, workers))
-            {
-                try
-                {
-                    handler();
-                }
-                catch (...)
-                {
-                    // Suppress all exceptions.
-                }
-
-                idle_queue_entry->store(nullptr);
-            }
-            else
-            {
-                std::unique_lock<std::mutex> lock(m_sleep_mutex);
-                
-                if (m_abort_sleep)
+                // A post has occurred during the sleep sequence! Abort the sleep sequence.
+                if (m_abort_idle)
                     continue;
 
-                m_is_asleep = true;
-                m_sleep_cv.wait(lock, [this]() { return m_abort_sleep; });
+                m_is_idle = true;
+                m_idle_cv.wait(lock, [this]() { return m_abort_idle; });
             }
+
         }
+    }
+    catch (WorkerStoppedException)
+    {
+        // Allow thread function to complete.
     }
 }
 

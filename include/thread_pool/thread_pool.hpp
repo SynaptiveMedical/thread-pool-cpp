@@ -2,6 +2,7 @@
 
 #include <thread_pool/fixed_function.hpp>
 #include <thread_pool/mpmc_bounded_queue.hpp>
+#include <thread_pool/bounded_random_access_bag.hpp>
 #include <thread_pool/thread_pool_options.hpp>
 #include <thread_pool/worker.hpp>
 
@@ -30,8 +31,6 @@ template <typename Task, template<typename> class Queue>
 class ThreadPoolImpl {
 
     using WorkerVector = std::vector<std::unique_ptr<Worker<Task, Queue>>>;
-    using IdleWorkerPtr = std::shared_ptr<std::atomic<Worker<Task, Queue>*>>;
-    using IdleWorkerQueue = MPMCBoundedQueue<IdleWorkerPtr>;
 
 public:
     /**
@@ -79,7 +78,7 @@ public:
 private:
     Worker<Task, Queue>& getWorker();
 
-    IdleWorkerQueue m_idle_workers;
+    BoundedRandomAccessBag m_idle_workers;
     WorkerVector m_workers;
     std::atomic<size_t> m_next_worker;
     std::atomic<size_t> m_num_busy_waiters;
@@ -137,38 +136,39 @@ template <typename Task, template<typename> class Queue>
 template <typename Handler>
 inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
 {
-    std::shared_ptr<std::atomic<Worker<Task, Queue>*>> idle_worker = nullptr;
+    size_t idle_worker_id;
 
+    // Prioritize any busy waiters. 
     if (m_num_busy_waiters.load() > 0)
     {
         if (!getWorker().tryPost(std::forward<Handler>(handler)))
-            return false;
+            return false; // Worker's task queue is full.
 
+        // Check to see if we still have busy waiters.
         if (m_num_busy_waiters.load() > 0)
             return true;
 
-        // Threads stopped busy waiting under our feet. We need to wake a worker to ensure the last posted item is processed.
-        while (m_idle_workers.pop(idle_worker))
-        {
-            if (auto worker = idle_worker->load())
-            {
-                worker->wake();
-                return true;
-            }
-        }
+        // Threads stopped busy waiting under our feet. 
+        // We need to wake a worker to ensure the last posted item is processed.
+        if (m_idle_workers.tryRemoveAny(idle_worker_id))
+            m_workers[idle_worker_id]->wake();
+            
+        return true;
     }
     
-
-    while (m_idle_workers.pop(idle_worker))
+    // Let's see if we have any idling threads. 
+    // These incur higher overhead to wake up than the busy waiters.
+    if (m_idle_workers.tryRemoveAny(idle_worker_id))
     {
-        if (auto worker = idle_worker->load())
-        {
-            bool success = worker->tryPost(std::forward<Handler>(handler));
-            worker->wake();
-            return success;
-        }
+        if (!getWorker().tryPost(std::forward<Handler>(handler)))
+            return false; // Worker's task queue is full.
+
+        m_workers[idle_worker_id]->wake();
+        return true;
     }
 
+    // No busy waiters, no idle threads. All our threads are active, so we 
+    // submit the work item in a round robin fashion.
     return getWorker().tryPost(std::forward<Handler>(handler));
 }
 
@@ -179,7 +179,7 @@ inline void ThreadPoolImpl<Task, Queue>::post(Handler&& handler)
     const auto ok = tryPost(std::forward<Handler>(handler));
     if (!ok)
     {
-        throw std::runtime_error("thread pool queue is full");
+        throw std::runtime_error("Thread pool queue is full.");
     }
 }
 
