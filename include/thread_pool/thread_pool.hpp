@@ -30,6 +30,8 @@ template <typename Task, template<typename> class Queue>
 class ThreadPoolImpl {
 
     using WorkerVector = std::vector<std::unique_ptr<Worker<Task, Queue>>>;
+    using IdleWorkerPtr = std::shared_ptr<std::atomic<Worker<Task, Queue>*>>;
+    using IdleWorkerQueue = MPMCBoundedQueue<IdleWorkerPtr>;
 
 public:
     /**
@@ -77,18 +79,21 @@ public:
 private:
     Worker<Task, Queue>& getWorker();
 
+    IdleWorkerQueue m_idle_workers;
     WorkerVector m_workers;
     std::atomic<size_t> m_next_worker;
+    std::atomic<size_t> m_num_busy_waiters;
 };
 
 
 /// Implementation
 
 template <typename Task, template<typename> class Queue>
-inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(
-                                            const ThreadPoolOptions& options)
-    : m_workers(options.threadCount())
+inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(const ThreadPoolOptions& options)
+    : m_idle_workers(options.threadCount())
+    , m_workers(options.threadCount())
     , m_next_worker(0)
+    , m_num_busy_waiters(0)
 {
     for(auto& worker_ptr : m_workers)
     {
@@ -97,7 +102,7 @@ inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(
 
     for(size_t i = 0; i < m_workers.size(); ++i)
     {
-        m_workers[i]->start(i, &m_workers);
+        m_workers[i]->start(i, &m_workers, &m_idle_workers, &m_num_busy_waiters);
     }
 }
 
@@ -132,6 +137,38 @@ template <typename Task, template<typename> class Queue>
 template <typename Handler>
 inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
 {
+    std::shared_ptr<std::atomic<Worker<Task, Queue>*>> idle_worker = nullptr;
+
+    if (m_num_busy_waiters.load() > 0)
+    {
+        if (!getWorker().tryPost(std::forward<Handler>(handler)))
+            return false;
+
+        if (m_num_busy_waiters.load() > 0)
+            return true;
+
+        // Threads stopped busy waiting under our feet. We need to wake a worker to ensure the last posted item is processed.
+        while (m_idle_workers.pop(idle_worker))
+        {
+            if (auto worker = idle_worker->load())
+            {
+                worker->wake();
+                return true;
+            }
+        }
+    }
+    
+
+    while (m_idle_workers.pop(idle_worker))
+    {
+        if (auto worker = idle_worker->load())
+        {
+            bool success = worker->tryPost(std::forward<Handler>(handler));
+            worker->wake();
+            return success;
+        }
+    }
+
     return getWorker().tryPost(std::forward<Handler>(handler));
 }
 
