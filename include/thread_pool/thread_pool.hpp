@@ -148,8 +148,9 @@ inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
         if (m_num_busy_waiters.load() > 0)
             return true;
 
-        // Threads stopped busy waiting under our feet. 
-        // We need to wake a worker to ensure the last posted item is processed.
+        // Threads stopped busy waiting under our feet. They are either all idle,
+        // or all active. We can check for the former by attempting to pop an idle worker.
+        // We need to do this to ensure the last posted item is processed.
         if (m_idle_workers.tryRemoveAny(idle_worker_id))
             m_workers[idle_worker_id]->wake();
             
@@ -160,7 +161,7 @@ inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
     // These incur higher overhead to wake up than the busy waiters.
     if (m_idle_workers.tryRemoveAny(idle_worker_id))
     {
-        if (!getWorker().tryPost(std::forward<Handler>(handler)))
+        if (!m_workers[idle_worker_id]->tryPost(std::forward<Handler>(handler)))
             return false; // Worker's task queue is full.
 
         m_workers[idle_worker_id]->wake();
@@ -169,7 +170,15 @@ inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
 
     // No busy waiters, no idle threads. All our threads are active, so we 
     // submit the work item in a round robin fashion.
-    return getWorker().tryPost(std::forward<Handler>(handler));
+    if (!getWorker().tryPost(std::forward<Handler>(handler)))
+        return false; // Worker's task queue is full.
+
+    // We have to ensure that at least one thread is active after our submission.
+    if (m_num_busy_waiters.load() == 0)
+        if (m_idle_workers.tryRemoveAny(idle_worker_id))
+            m_workers[idle_worker_id]->wake();
+
+    return true;
 }
 
 template <typename Task, template<typename> class Queue>
