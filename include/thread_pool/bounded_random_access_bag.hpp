@@ -4,6 +4,9 @@
 
 #include <atomic>
 
+namespace tp
+{
+
 /**
 * @brief The Bounded Random Access Bag is a lockless bag which supports add/remove, as well as 
 * unordered retrieval of its constituent elements. The bag supports multiple consumers, and a single
@@ -171,4 +174,6 @@ inline bool BoundedRandomAccessBag::tryRemoveAny(size_t& id)
 
     // Queue empty.
     return false;
+}
+
 }
