@@ -138,42 +138,23 @@ inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
 {
     size_t idle_worker_id;
 
-    // Prioritize any busy waiters. 
-    if (m_num_busy_waiters.load() > 0)
-    {
-        if (!getWorker().tryPost(std::forward<Handler>(handler)))
-            return false; // Worker's task queue is full.
-
-        // Check to see if we still have busy waiters.
-        if (m_num_busy_waiters.load() > 0)
-            return true;
-
-        // Threads stopped busy waiting under our feet. They are either all idle,
-        // or all active. We can check for the former by attempting to pop an idle worker.
-        // We need to do this to ensure the last posted item is processed.
-        if (m_idle_workers.tryRemoveAny(idle_worker_id))
-            m_workers[idle_worker_id]->wake();
-            
-        return true;
-    }
-    
-    // Let's see if we have any idling threads. 
+    // If there aren't busy waiters, let's see if we have any idling threads. 
     // These incur higher overhead to wake up than the busy waiters.
-    if (m_idle_workers.tryRemoveAny(idle_worker_id))
+    if (m_num_busy_waiters.load() == 0 && m_idle_workers.tryRemoveAny(idle_worker_id))
     {
-        if (!m_workers[idle_worker_id]->tryPost(std::forward<Handler>(handler)))
-            return false; // Worker's task queue is full.
-
+        auto success = m_workers[idle_worker_id]->tryPost(std::forward<Handler>(handler));
         m_workers[idle_worker_id]->wake();
-        return true;
+
+        return success;
     }
 
-    // No busy waiters, no idle threads. All our threads are active, so we 
-    // submit the work item in a round robin fashion.
+    // No idle threads. Our threads are either active or busy waiting
+    // Either way, submit the work item in a round robin fashion.
     if (!getWorker().tryPost(std::forward<Handler>(handler)))
         return false; // Worker's task queue is full.
 
     // We have to ensure that at least one thread is active after our submission.
+    // Threads could have transitioned into idling under our feet. We need to account for this.
     if (m_num_busy_waiters.load() == 0)
         if (m_idle_workers.tryRemoveAny(idle_worker_id))
             m_workers[idle_worker_id]->wake();
@@ -205,4 +186,5 @@ inline Worker<Task, Queue>& ThreadPoolImpl<Task, Queue>::getWorker()
 
     return *m_workers[id];
 }
+
 }

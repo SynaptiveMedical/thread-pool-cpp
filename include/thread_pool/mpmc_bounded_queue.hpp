@@ -180,13 +180,10 @@ inline bool MPMCBoundedQueue<T>::push(U&& data)
         intptr_t dif = (intptr_t)seq - (intptr_t)pos;
         if(dif == 0)
         {
-            if(m_enqueue_pos.compare_exchange_weak(
-                   pos, pos + 1, std::memory_order_relaxed))
-            {
+            if(m_enqueue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
                 break;
-            }
         }
-        else if(dif < 0)
+        else if(dif < 0 && m_enqueue_pos.load(std::memory_order_relaxed) - m_buffer_mask - 1 == m_dequeue_pos.load(std::memory_order_relaxed))
         {
             return false;
         }
@@ -215,13 +212,10 @@ inline bool MPMCBoundedQueue<T>::pop(T& data)
         intptr_t dif = (intptr_t)seq - (intptr_t)(pos + 1);
         if(dif == 0)
         {
-            if(m_dequeue_pos.compare_exchange_weak(
-                   pos, pos + 1, std::memory_order_relaxed))
-            {
+            if(m_dequeue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
                 break;
-            }
         }
-        else if(dif < 0)
+        else if(dif < 0 && m_dequeue_pos.load(std::memory_order_relaxed) == m_enqueue_pos.load(std::memory_order_relaxed))
         {
             return false;
         }

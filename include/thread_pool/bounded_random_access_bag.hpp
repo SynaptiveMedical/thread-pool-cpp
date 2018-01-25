@@ -112,9 +112,12 @@ inline void BoundedRandomAccessBag::add(size_t id)
     {
     case Element::State::NotQueued:
         // No race, single producer.
-        m_elements[id].state.store(Element::State::QueuedValid);
+        if (m_elements[id].state.exchange(Element::State::QueuedValid) != Element::State::NotQueued)
+            throw std::logic_error("Another producer has added the item. This violates single producer semantics.");
+
         if (!m_queue.push(&m_elements[id]))
-            throw std::exception("Internal Logic Error: The queue is full."); // This should never occur.
+            throw std::logic_error("Queue is full.");
+
         break;
 
     case Element::State::QueuedValid:
@@ -130,10 +133,10 @@ inline void BoundedRandomAccessBag::add(size_t id)
             if (m_elements[id].state.compare_exchange_strong(state, Element::State::QueuedValid))
             {
                 if (!m_queue.push(&m_elements[id]))
-                    throw std::exception("Internal Logic Error: The queue is full."); // This should never occur.
+                    throw std::logic_error("Queue is full.");
             }
             else
-                throw std::exception("Another producer has added the item. This violates single producer semantics.");
+                throw std::runtime_error("Another producer has added the item. This violates single producer semantics.");
         }
         break;
     }
@@ -160,7 +163,7 @@ inline bool BoundedRandomAccessBag::tryRemoveAny(size_t& id)
         switch (previous)
         {
         case Element::State::NotQueued:
-            throw std::exception("Internal Logic Error: State machine logic violation.");
+            throw std::logic_error("State machine logic violation.");
 
         case Element::State::QueuedValid:
             id = element->id;

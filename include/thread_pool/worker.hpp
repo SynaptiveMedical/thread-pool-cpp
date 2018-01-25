@@ -314,8 +314,11 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Bo
 
             // No tasks were found during the busy wait sequence. 
             // We now transition into the idle state.
-            m_is_idle = false;
-            m_abort_idle = false;
+            {
+                std::unique_lock<std::mutex> lock(m_idle_mutex);
+                m_is_idle = false;
+                m_abort_idle = false;
+            }
 
             // We put this worker up for grabs as a recipient to new posts in the thread pool.
             idle_workers->add(id);
@@ -346,7 +349,6 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Bo
                 m_is_idle = true;
                 m_idle_cv.wait(lock, [this]() { return m_abort_idle; });
             }
-
         }
     }
     catch (WorkerStoppedException)
