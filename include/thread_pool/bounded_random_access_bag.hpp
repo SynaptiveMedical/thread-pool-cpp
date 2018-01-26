@@ -115,9 +115,7 @@ inline void BoundedRandomAccessBag::add(size_t id)
         if (m_elements[id].state.exchange(Element::State::QueuedValid) != Element::State::NotQueued)
             throw std::logic_error("Another producer has added the item. This violates single producer semantics.");
 
-        if (!m_queue.push(&m_elements[id]))
-            throw std::logic_error("Queue is full.");
-
+        while (!m_queue.pushWeak(&m_elements[id])); // Queue should never overflow. Use weak form for performance.
         break;
 
     case Element::State::QueuedValid:
@@ -131,10 +129,7 @@ inline void BoundedRandomAccessBag::add(size_t id)
             // Since we are the only producer, it is safe to throw the object back in the queue.
             state = Element::State::NotQueued;
             if (m_elements[id].state.compare_exchange_strong(state, Element::State::QueuedValid))
-            {
-                if (!m_queue.push(&m_elements[id]))
-                    throw std::logic_error("Queue is full.");
-            }
+                while (!m_queue.pushWeak(&m_elements[id])); // Queue should never overflow. Use weak form for performance.
             else
                 throw std::runtime_error("Another producer has added the item. This violates single producer semantics.");
         }
@@ -152,7 +147,7 @@ inline void BoundedRandomAccessBag::remove(size_t id)
 inline bool BoundedRandomAccessBag::tryRemoveAny(size_t& id)
 {
     Element* element;
-    while (m_queue.pop(element))
+    while (m_queue.popStrong(element))
     {
         // Once a consumer pops an element, they are the sole controller of that object's membership to the queue
         // (i.e. they are solely responsible for the transition back into the NotQueued state) by virtue of the

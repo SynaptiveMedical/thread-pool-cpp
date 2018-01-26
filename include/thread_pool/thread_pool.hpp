@@ -17,7 +17,7 @@ namespace tp
 template <typename Task, template<typename> class Queue>
 class ThreadPoolImpl;
 using ThreadPool = ThreadPoolImpl<FixedFunction<void(), 128>,
-                                  MPMCBoundedQueue>;
+                                    MPMCBoundedQueue>;
 
 /**
  * @brief The ThreadPool class implements thread pool pattern.

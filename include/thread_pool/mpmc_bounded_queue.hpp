@@ -76,19 +76,40 @@ public:
     MPMCBoundedQueue& operator=(MPMCBoundedQueue&& rhs) noexcept;
 
     /**
-     * @brief push Push data to queue.
+     * @brief pushStrong Push data to queue.
      * @param data Data to be pushed.
-     * @return true on success.
+     * @return true on success, if the result is false it is safe to 
+     * infer that the queue is full at the time of the call.
      */
     template <typename U>
-    bool push(U&& data);
+    bool pushStrong(U&& data);
 
     /**
-     * @brief pop Pop data from queue.
+     * @brief popStrong Pop data from queue.
      * @param data Place to store popped data.
-     * @return true on sucess.
+     * @return true on sucess, if the result is false it is safe to
+     * infer that the queue is empty at the time of the call.
      */
-    bool pop(T& data);
+    bool popStrong(T& data);
+
+    /**
+    * @brief pushWeak Push data to queue. May fail spuriously, 
+    * but is more performant than push_strong.
+    * @param data Data to be pushed.
+    * @return true on success, if the result is false it is NOT safe to 
+     * infer that the queue is full at the time of the call.
+    */
+    template <typename U>
+    bool pushWeak(U&& data);
+
+    /**
+    * @brief popWeak Pop data from queue. May fail spuriously, 
+    * but is more performant than pop_strong.
+    * @param data Place to store popped data.
+    * @return true on sucess, if the result is false it is NOT safe to
+     * infer that the queue is empty at the time of the call.
+    */
+    bool popWeak(T& data);
 
 private:
     struct Cell
@@ -115,7 +136,25 @@ private:
         }
     };
 
-private:
+    /**
+    * @brief push Push data to queue.
+    * @param data Data to be pushed.
+    * @param is_strong false if we wish to allow spurious failures 
+    * to occur in interest of performance benefits.
+    * @return true on success.
+    */
+    template <typename U>
+    bool push(U&& data, bool is_strong);
+
+    /**
+    * @brief pop Pop data from queue.
+    * @param data Place to store popped data.
+    * @param is_strong false if we wish to allow spurious failures 
+    * to occur in interest of performance benefits.
+    * @return true on sucess.
+    */
+    bool pop(T& data, bool is_strong);
+
     typedef char Cacheline[64];
 
     Cacheline pad0;
@@ -169,7 +208,33 @@ inline MPMCBoundedQueue<T>& MPMCBoundedQueue<T>::operator=(MPMCBoundedQueue&& rh
 
 template <typename T>
 template <typename U>
-inline bool MPMCBoundedQueue<T>::push(U&& data)
+inline bool MPMCBoundedQueue<T>::pushStrong(U&& data)
+{
+    return push(std::forward<U>(data), true);
+}
+
+template <typename T>
+inline bool MPMCBoundedQueue<T>::popStrong(T& data)
+{
+    return pop(data, true);
+}
+
+template <typename T>
+template <typename U>
+inline bool MPMCBoundedQueue<T>::pushWeak(U&& data)
+{
+    return push(std::forward<U>(data), false);
+}
+
+template <typename T>
+inline bool MPMCBoundedQueue<T>::popWeak(T& data)
+{
+    return pop(data, false);
+}
+
+template <typename T>
+template <typename U>
+inline bool MPMCBoundedQueue<T>::push(U&& data, bool is_strong)
 {
     Cell* cell;
     size_t pos = m_enqueue_pos.load(std::memory_order_relaxed);
@@ -183,7 +248,7 @@ inline bool MPMCBoundedQueue<T>::push(U&& data)
             if(m_enqueue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
                 break;
         }
-        else if(dif < 0 && m_enqueue_pos.load(std::memory_order_relaxed) - m_buffer_mask - 1 == m_dequeue_pos.load(std::memory_order_relaxed))
+        else if(dif < 0 && (!is_strong || m_enqueue_pos.load(std::memory_order_relaxed) - m_buffer_mask - 1 == m_dequeue_pos.load(std::memory_order_relaxed)))
         {
             return false;
         }
@@ -201,7 +266,7 @@ inline bool MPMCBoundedQueue<T>::push(U&& data)
 }
 
 template <typename T>
-inline bool MPMCBoundedQueue<T>::pop(T& data)
+inline bool MPMCBoundedQueue<T>::pop(T& data, bool is_strong)
 {
     Cell* cell;
     size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
@@ -215,7 +280,7 @@ inline bool MPMCBoundedQueue<T>::pop(T& data)
             if(m_dequeue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
                 break;
         }
-        else if(dif < 0 && m_dequeue_pos.load(std::memory_order_relaxed) == m_enqueue_pos.load(std::memory_order_relaxed))
+        else if(dif < 0 && (!is_strong || m_dequeue_pos.load(std::memory_order_relaxed) == m_enqueue_pos.load(std::memory_order_relaxed)))
         {
             return false;
         }
@@ -227,8 +292,7 @@ inline bool MPMCBoundedQueue<T>::pop(T& data)
 
     data = std::move(cell->data);
 
-    cell->sequence.store(
-        pos + m_buffer_mask + 1, std::memory_order_release);
+    cell->sequence.store(pos + m_buffer_mask + 1, std::memory_order_release);
 
     return true;
 }
