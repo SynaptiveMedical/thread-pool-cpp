@@ -96,7 +96,7 @@ inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(const ThreadPoolOptions& opti
 {
     for(auto& worker_ptr : m_workers)
     {
-        worker_ptr.reset(new Worker<Task, Queue>(options.queueSize()));
+        worker_ptr.reset(new Worker<Task, Queue>(options.queueSize(), options.numBusyWaitIterations()));
     }
 
     for(size_t i = 0; i < m_workers.size(); ++i)

@@ -46,8 +46,10 @@ public:
     /**
     * @brief Worker Constructor.
     * @param queue_size Length of undelaying task queue.
+    * @param num_busy_wait_iterations The number of exponential backoff sleep iterations
+    * to perform during the busy wait state.
     */
-    explicit Worker(size_t queue_size);
+    explicit Worker(size_t queue_size, size_t num_busy_wait_iterations);
 
     /**
     * @brief Move ctor implementation.
@@ -133,18 +135,17 @@ private:
     void threadFunc(size_t id, WorkerVector* workers, BoundedRandomAccessBag* idle_workers, std::atomic<size_t>* num_busy_waiters);
 
     
-    // Constants.
-    const size_t m_num_busy_wait_iterations = 3;
-
-    // Members.
+    size_t m_num_busy_wait_iterations;
     Queue<Task> m_queue;
     std::atomic<bool> m_running_flag;
     std::thread m_thread;
     size_t m_next_donor;
-    bool m_is_idle;
-    bool m_abort_idle;
+    
     std::mutex m_idle_mutex;
     std::condition_variable m_idle_cv;
+
+    bool m_is_idle;
+    bool m_abort_idle;
     
 };
 
@@ -161,8 +162,9 @@ namespace detail
 }
 
 template <typename Task, template<typename> class Queue>
-inline Worker<Task, Queue>::Worker(size_t queue_size)
-    : m_queue(queue_size)
+inline Worker<Task, Queue>::Worker(size_t queue_size, size_t num_busy_wait_iterations)
+    : m_num_busy_wait_iterations(num_busy_wait_iterations)
+    , m_queue(queue_size)
     , m_running_flag(true)
     , m_next_donor(0) // Initialized in threadFunc.
     , m_is_idle(false)
@@ -181,6 +183,7 @@ inline Worker<Task, Queue>& Worker<Task, Queue>::operator=(Worker&& rhs) noexcep
 {
     if (this != &rhs)
     {
+        m_num_busy_wait_iterations = rhs.m_num_busy_wait_iterations;
         m_queue = std::move(rhs.m_queue);
         m_running_flag = rhs.m_running_flag.load();
         m_thread = std::move(rhs.m_thread);
