@@ -219,11 +219,15 @@ inline size_t Worker<Task, Queue>::getWorkerIdForCurrentThread()
 template <typename Task, template<typename> class Queue>
 inline void Worker<Task, Queue>::wake()
 {
-    std::unique_lock<std::mutex> lock(m_idle_mutex);
+    bool notify;
+    {
+        std::unique_lock<std::mutex> lock(m_idle_mutex);
 
-    m_abort_idle = true;
-
-    if (m_is_idle)
+        m_abort_idle = true;
+        notify = m_is_idle;
+    }
+    // Notify outside of lock.
+    if (notify)
         m_idle_cv.notify_one();
 }
 
@@ -293,7 +297,7 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Bo
     *detail::thread_id() = id;
     m_next_donor = (id + 1) % workers->size();
     Task handler;
-    bool taskFound = false;
+    bool task_found = false;
 
     try
     {
@@ -305,19 +309,19 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Bo
 
             // We were unable to obtain a task. 
             // We now transition into the busy wait state.
-            taskFound = false;
-            num_busy_waiters->fetch_add(1);
+            task_found = false;
+            num_busy_waiters->fetch_add(1, std::memory_order_acq_rel);
 
-            for (auto i = 0u; i < m_num_busy_wait_iterations && !taskFound; i++)
+            for (auto i = 0u; i < m_num_busy_wait_iterations && !task_found; i++)
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<size_t>(pow(2, i))));
-                taskFound = tryHandleTask(handler, workers, false);
+                task_found = tryHandleTask(handler, workers, false);
             }
 
             // If we found a task during our busy wait sequence, we abort it and transition back into the active loop.
-            if (taskFound)
+            if (task_found)
             {
-                num_busy_waiters->fetch_add(-1);
+                num_busy_waiters->fetch_add(-1, std::memory_order_acq_rel);
                 continue;
             }
 
@@ -334,7 +338,7 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Bo
 
             // We need to transition out of the busy wait state after we have submitted ourselves to the idle 
             // worker queue in order to avoid a race.
-            num_busy_waiters->fetch_add(-1);
+            num_busy_waiters->fetch_add(-1, std::memory_order_acq_rel);
 
             // While we were adding this worker to the idle worker bag, a job may have been posted into this 
             // worker's queue. We need to check for work again before initiating the deep sleep sequence, otherwise

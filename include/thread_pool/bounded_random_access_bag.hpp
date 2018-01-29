@@ -18,7 +18,7 @@ class BoundedRandomAccessBag
     * @brief The implementation of a single element of the bag. Maintains state and id.
     * @details State Machine:
         *
-        *             +------- TryRemove() -------+-------------------------------+    +-- remove() --+
+        *             +------ TryRemoveAny -------+-------------------------------+    +-- remove() --+
         *             |                           |                               |    |              |
         *             v                           |                               |    |              |
         *       +-----------+              +-------------+                 +---------------+          |
@@ -107,14 +107,10 @@ inline BoundedRandomAccessBag::BoundedRandomAccessBag(size_t size)
 
 inline void BoundedRandomAccessBag::add(size_t id)
 {
-
-    switch (m_elements[id].state.load())
+    switch (m_elements[id].state.exchange(Element::State::QueuedValid, std::memory_order_acq_rel))
     {
     case Element::State::NotQueued:
-        // No race, single producer.
-        if (m_elements[id].state.exchange(Element::State::QueuedValid) != Element::State::NotQueued)
-            throw std::logic_error("Another producer has added the item. This violates single producer semantics.");
-
+        // No race, single producer per element.
         while (!m_queue.pushWeak(&m_elements[id])); // Queue should never overflow. Use weak form for performance.
         break;
 
@@ -122,17 +118,7 @@ inline void BoundedRandomAccessBag::add(size_t id)
         throw std::runtime_error("The item has already been added to the bag.");
 
     case Element::State::QueuedInvalid:
-        auto state = Element::State::QueuedInvalid;
-        if (!m_elements[id].state.compare_exchange_strong(state, Element::State::QueuedValid))
-        {
-            // Someone called TryRemoveAny, and our state had transitioned into NotQueued.
-            // Since we are the only producer, it is safe to throw the object back in the queue.
-            state = Element::State::NotQueued;
-            if (m_elements[id].state.compare_exchange_strong(state, Element::State::QueuedValid))
-                while (!m_queue.pushWeak(&m_elements[id])); // Queue should never overflow. Use weak form for performance.
-            else
-                throw std::runtime_error("Another producer has added the item. This violates single producer semantics.");
-        }
+        // Item will still be in the queue. We are done.
         break;
     }
 }
@@ -141,7 +127,7 @@ inline void BoundedRandomAccessBag::remove(size_t id)
 {
     // This consumer action is solely responsible for an indiscriminant QueuedValid -> QueuedInvalid state transition.
     auto state = Element::State::QueuedValid;
-    m_elements[id].state.compare_exchange_strong(state, Element::State::QueuedInvalid);
+    m_elements[id].state.compare_exchange_strong(state, Element::State::QueuedInvalid, std::memory_order_acq_rel);
 }
 
 inline bool BoundedRandomAccessBag::tryRemoveAny(size_t& id)
@@ -153,9 +139,7 @@ inline bool BoundedRandomAccessBag::tryRemoveAny(size_t& id)
         // (i.e. they are solely responsible for the transition back into the NotQueued state) by virtue of the
         // MPMCBoundedQueue's atomicity semantics.
         // In other words, only one consumer can hold a popped element before it its state is set to NotQueued.
-        auto previous = element->state.exchange(Element::State::NotQueued);
-
-        switch (previous)
+        switch (element->state.exchange(Element::State::NotQueued, std::memory_order_acq_rel))
         {
         case Element::State::NotQueued:
             throw std::logic_error("State machine logic violation.");
