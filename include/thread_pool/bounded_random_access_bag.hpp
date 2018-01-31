@@ -17,16 +17,16 @@ class BoundedRandomAccessBag
     /**
     * @brief The implementation of a single element of the bag. Maintains state and id.
     * @details State Machine:
-        *
-        *             +------ TryRemoveAny -------+-------------------------------+    +-- remove() --+
-        *             |                           |                               |    |              |
-        *             v                           |                               |    |              |
-        *       +-----------+              +-------------+                 +---------------+          |
-        *   +---| NotQueued | -- add() --> | QueuedValid | -- remove() --> | QueuedInvalid | <--------+
-        *   |   +-----------+              +-------------+                 +---------------+
-        *   |            ^                        ^                               |
-        *   |            |                        |                               |
-        *   +- remove() -+                        +------------- add() -----------+
+    *
+    *             +------ TryRemoveAny -------+-------------------------------+ 
+    *             |                           |                               | 
+    *             v                           |                               | 
+    *       +-----------+              +-------------+                 +---------------+           
+    *       | NotQueued | -- add() --> | QueuedValid | -- remove() --> | QueuedInvalid |
+    *       +-----------+              +-------------+                 +---------------+
+    *                                         ^                               |
+    *                                         |                               |
+    *                                         +------------- add() -----------+
     */
     struct Element
     {
@@ -80,8 +80,10 @@ public:
     /**
     * @brief remove Removes the element with the specified id from the bag.
     * @param id The id of the element to remove.
+    * @returns true if the state of the bag was changed, false otherwise. 
+    * The element will not be in the bag after the call regardless of the outcome.
     */
-    void remove(size_t id);
+    bool remove(size_t id);
 
     /**
     * @brief tryRemoveAny Try to remove any element from the bag.
@@ -123,11 +125,11 @@ inline void BoundedRandomAccessBag::add(size_t id)
     }
 }
 
-inline void BoundedRandomAccessBag::remove(size_t id)
+inline bool BoundedRandomAccessBag::remove(size_t id)
 {
     // This consumer action is solely responsible for an indiscriminant QueuedValid -> QueuedInvalid state transition.
     auto state = Element::State::QueuedValid;
-    m_elements[id].state.compare_exchange_strong(state, Element::State::QueuedInvalid, std::memory_order_acq_rel);
+    return m_elements[id].state.compare_exchange_strong(state, Element::State::QueuedInvalid, std::memory_order_acq_rel);
 }
 
 inline bool BoundedRandomAccessBag::tryRemoveAny(size_t& id)

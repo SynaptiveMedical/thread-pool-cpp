@@ -347,9 +347,11 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Bo
             if (tryHandleTask(handler, workers))
             {
                 // A task was indeed posted in the time it took this worker to enter the bag.
-                // We remove the worker from the bag, and transition to the active state.
-                idle_workers->remove(id);
-                continue;
+                // We remove the worker from the bag. If the internal state of the bag was not changed,
+                // this means a different thread has already removed this worker from the idle queue, 
+                // and this case will be caught below.
+                if (idle_workers->remove(id))
+                    continue;
             }
 
             {
