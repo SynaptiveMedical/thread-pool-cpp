@@ -1,6 +1,6 @@
 #pragma once
 
-#include <thread_pool/bounded_random_access_bag.hpp>
+#include <thread_pool/slotted_bag.hpp>
 
 #include <atomic>
 #include <thread>
@@ -66,7 +66,7 @@ public:
     * @param id Worker ID.
     * @param workers Sibling workers for performing round robin work stealing.
     */
-    void start(size_t id, WorkerVector* workers, BoundedRandomAccessBag* idle_workers, std::atomic<size_t>* num_busy_waiters);
+    void start(size_t id, WorkerVector* workers, SlottedBag* idle_workers, std::atomic<size_t>* num_busy_waiters);
 
     /**
     * @brief stop Stop all worker's thread and stealing activity.
@@ -132,7 +132,7 @@ private:
     * @param id Worker ID to be associated with this thread.
     * @param workers Sibling workers for performing round robin work stealing.
     */
-    void threadFunc(size_t id, WorkerVector* workers, BoundedRandomAccessBag* idle_workers, std::atomic<size_t>* num_busy_waiters);
+    void threadFunc(size_t id, WorkerVector* workers, SlottedBag* idle_workers, std::atomic<size_t>* num_busy_waiters);
 
     
     size_t m_num_busy_wait_iterations;
@@ -205,7 +205,7 @@ inline void Worker<Task, Queue>::stop()
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::start(size_t id, WorkerVector* workers, BoundedRandomAccessBag* idle_workers, std::atomic<size_t>* num_busy_waiters)
+inline void Worker<Task, Queue>::start(size_t id, WorkerVector* workers, SlottedBag* idle_workers, std::atomic<size_t>* num_busy_waiters)
 {
     m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, workers, idle_workers, num_busy_waiters);
 }
@@ -292,7 +292,7 @@ bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector* workers, bool 
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, BoundedRandomAccessBag* idle_workers, std::atomic<size_t>* num_busy_waiters)
+inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, SlottedBag* idle_workers, std::atomic<size_t>* num_busy_waiters)
 {
     *detail::thread_id() = id;
     m_next_donor = (id + 1) % workers->size();
@@ -334,7 +334,7 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Bo
             }
 
             // We put this worker up for grabs as a recipient to new posts in the thread pool.
-            idle_workers->add(id);
+            idle_workers->fill(id);
 
             // We need to transition out of the busy wait state after we have submitted ourselves to the idle 
             // worker queue in order to avoid a race.
@@ -350,7 +350,7 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Bo
                 // We remove the worker from the bag. If the internal state of the bag was not changed,
                 // this means a different thread has already removed this worker from the idle queue, 
                 // and this case will be caught below.
-                if (idle_workers->remove(id))
+                if (idle_workers->empty(id))
                     continue;
             }
 

@@ -2,7 +2,7 @@
 
 #include <thread_pool/fixed_function.hpp>
 #include <thread_pool/mpmc_bounded_queue.hpp>
-#include <thread_pool/bounded_random_access_bag.hpp>
+#include <thread_pool/slotted_bag.hpp>
 #include <thread_pool/thread_pool_options.hpp>
 #include <thread_pool/worker.hpp>
 
@@ -78,7 +78,7 @@ public:
 private:
     Worker<Task, Queue>& getWorker();
 
-    BoundedRandomAccessBag m_idle_workers;
+    SlottedBag m_idle_workers;
     WorkerVector m_workers;
     std::atomic<size_t> m_next_worker;
     std::atomic<size_t> m_num_busy_waiters;
@@ -140,7 +140,7 @@ inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
 
     // If there aren't busy waiters, let's see if we have any idling threads. 
     // These incur higher overhead to wake up than the busy waiters.
-    if (m_num_busy_waiters.load(std::memory_order_acquire) == 0 && m_idle_workers.tryRemoveAny(idle_worker_id))
+    if (m_num_busy_waiters.load(std::memory_order_acquire) == 0 && m_idle_workers.tryEmptyAny(idle_worker_id))
     {
         auto success = m_workers[idle_worker_id]->tryPost(std::forward<Handler>(handler));
         m_workers[idle_worker_id]->wake();
@@ -156,7 +156,7 @@ inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
     // We have to ensure that at least one thread is active after our submission.
     // Threads could have transitioned into idling under our feet. We need to account for this.
     if (m_num_busy_waiters.load(std::memory_order_acquire) == 0)
-        if (m_idle_workers.tryRemoveAny(idle_worker_id))
+        if (m_idle_workers.tryEmptyAny(idle_worker_id))
             m_workers[idle_worker_id]->wake();
 
     return true;
