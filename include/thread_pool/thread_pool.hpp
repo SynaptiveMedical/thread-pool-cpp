@@ -78,7 +78,7 @@ private:
     /**
     * @brief getWorker Obtain a reference to the local thread's associated worker,
     * otherwise return the next worker in the round robin.
-s    */
+    */
     Worker<Task, Queue>& getWorker();
 
     SlottedBag<Queue> m_idle_workers;
@@ -116,9 +116,7 @@ template <typename Task, template<typename> class Queue>
 inline ThreadPoolImpl<Task, Queue>::~ThreadPoolImpl()
 {
     for (auto& worker_ptr : m_workers)
-    {
         worker_ptr->stop();
-    }
 }
 
 template <typename Task, template<typename> class Queue>
@@ -169,9 +167,7 @@ inline void ThreadPoolImpl<Task, Queue>::post(Handler&& handler)
 {
     const auto ok = tryPost(std::forward<Handler>(handler));
     if (!ok)
-    {
         throw std::runtime_error("Thread pool queue is full.");
-    }
 }
 
 template <typename Task, template<typename> class Queue>
@@ -180,10 +176,7 @@ inline Worker<Task, Queue>& ThreadPoolImpl<Task, Queue>::getWorker()
     auto id = Worker<Task, Queue>::getWorkerIdForCurrentThread();
 
     if (id > m_workers.size())
-    {
-        id = m_next_worker.fetch_add(1, std::memory_order_relaxed) %
-             m_workers.size();
-    }
+        id = m_next_worker.fetch_add(1, std::memory_order_relaxed) % m_workers.size();
 
     return *m_workers[id];
 }
