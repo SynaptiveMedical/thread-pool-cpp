@@ -75,9 +75,13 @@ public:
     void post(Handler&& handler);
 
 private:
+    /**
+    * @brief getWorker Obtain a reference to the local thread's associated worker,
+    * otherwise return the next worker in the round robin.
+s    */
     Worker<Task, Queue>& getWorker();
 
-    SlottedBag m_idle_workers;
+    SlottedBag<Queue> m_idle_workers;
     WorkerVector m_workers;
     std::atomic<size_t> m_next_worker;
     std::atomic<size_t> m_num_busy_waiters;

@@ -66,7 +66,7 @@ public:
     * @param num_busy_waiters A pointer to the atomic busy waiter counter.
     * @note The parameters passed into this function generally relate to the global thread pool state.
     */
-    void start(size_t id, WorkerVector* workers, SlottedBag* idle_workers, std::atomic<size_t>* num_busy_waiters);
+    void start(size_t id, WorkerVector* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters);
 
     /**
     * @brief stop Stop all worker's thread and stealing activity.
@@ -132,7 +132,7 @@ private:
     * @param id Worker ID to be associated with this thread.
     * @param workers Sibling workers for performing round robin work stealing.
     */
-    void threadFunc(size_t id, WorkerVector* workers, SlottedBag* idle_workers, std::atomic<size_t>* num_busy_waiters);
+    void threadFunc(size_t id, WorkerVector* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters);
 
     
     Queue<Task> m_queue;
@@ -205,7 +205,7 @@ inline void Worker<Task, Queue>::stop()
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::start(size_t id, WorkerVector* workers, SlottedBag* idle_workers, std::atomic<size_t>* num_busy_waiters)
+inline void Worker<Task, Queue>::start(size_t id, WorkerVector* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters)
 {
     m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, workers, idle_workers, num_busy_waiters);
 }
@@ -292,7 +292,7 @@ bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector* workers, bool 
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, SlottedBag* idle_workers, std::atomic<size_t>* num_busy_waiters)
+inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters)
 {
     *detail::thread_id() = id;
     m_next_donor = (id + 1) % workers->size();

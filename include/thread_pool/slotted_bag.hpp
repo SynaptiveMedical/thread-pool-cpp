@@ -13,6 +13,7 @@ namespace tp
 * The bag supports filling and emptying slots, as well as the unordered emptying of any full slot. 
 * The bag supports multiple consumers, and a single producer per slot.
 */
+template <template<typename> class Queue>
 class SlottedBag
 {
     /**
@@ -96,11 +97,12 @@ public:
     bool tryEmptyAny(size_t& id);
 
 private:
-    MPMCBoundedQueue<Slot*> m_queue;
+    Queue<Slot*> m_queue;
     std::vector<Slot> m_slots;
 };
 
-inline SlottedBag::SlottedBag(size_t size)
+template <template<typename> class Queue>
+inline SlottedBag<Queue>::SlottedBag(size_t size)
     : m_queue(size)
     , m_slots(size)
 {
@@ -108,7 +110,8 @@ inline SlottedBag::SlottedBag(size_t size)
         m_slots[i].id = i;
 }
 
-inline void SlottedBag::fill(size_t id)
+template <template<typename> class Queue>
+inline void SlottedBag<Queue>::fill(size_t id)
 {
     switch (m_slots[id].state.exchange(Slot::State::QueuedValid, std::memory_order_acq_rel))
     {
@@ -126,14 +129,16 @@ inline void SlottedBag::fill(size_t id)
     }
 }
 
-inline bool SlottedBag::empty(size_t id)
+template <template<typename> class Queue>
+inline bool SlottedBag<Queue>::empty(size_t id)
 {
     // This consumer action is solely responsible for an indiscriminant QueuedValid -> QueuedInvalid state transition.
     auto state = Slot::State::QueuedValid;
     return m_slots[id].state.compare_exchange_strong(state, Slot::State::QueuedInvalid, std::memory_order_acq_rel);
 }
 
-inline bool SlottedBag::tryEmptyAny(size_t& id)
+template <template<typename> class Queue>
+inline bool SlottedBag<Queue>::tryEmptyAny(size_t& id)
 {
     Slot* slot;
     while (m_queue.popStrong(slot))
