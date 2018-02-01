@@ -37,8 +37,7 @@ public:
      * @brief ThreadPool Construct and start new thread pool.
      * @param options Creation options.
      */
-    explicit ThreadPoolImpl(
-        const ThreadPoolOptions& options = ThreadPoolOptions());
+    explicit ThreadPoolImpl(ThreadPoolOptions&& options = ThreadPoolOptions());
 
     /**
      * @brief Move ctor implementation.
@@ -88,21 +87,19 @@ private:
 /// Implementation
 
 template <typename Task, template<typename> class Queue>
-inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(const ThreadPoolOptions& options)
+inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(ThreadPoolOptions&& options)
     : m_idle_workers(options.threadCount())
     , m_workers(options.threadCount())
     , m_next_worker(0)
     , m_num_busy_waiters(0)
 {
-    for(auto& worker_ptr : m_workers)
-    {
-        worker_ptr.reset(new Worker<Task, Queue>(options.queueSize(), options.numBusyWaitIterations()));
-    }
+    // Instatiate all workers.
+    for (auto it = m_workers.begin(); it != m_workers.end(); ++it)
+        it->reset(new Worker<Task, Queue>(options.busyWaitOptions(), options.queueSize()));
 
-    for(size_t i = 0; i < m_workers.size(); ++i)
-    {
+    // Initialize all worker threads.
+    for (size_t i = 0; i < m_workers.size(); ++i)
         m_workers[i]->start(i, &m_workers, &m_idle_workers, &m_num_busy_waiters);
-    }
 }
 
 template <typename Task, template<typename> class Queue>
