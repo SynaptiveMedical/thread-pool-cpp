@@ -5,11 +5,13 @@
 #include <thread_pool/slotted_bag.hpp>
 #include <thread_pool/thread_pool_options.hpp>
 #include <thread_pool/worker.hpp>
+#include <thread_pool/rouser.hpp>
 
 #include <atomic>
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#include <chrono>
 
 namespace tp
 {
@@ -37,22 +39,32 @@ public:
      * @brief ThreadPool Construct and start new thread pool.
      * @param options Creation options.
      */
-    explicit ThreadPoolImpl(ThreadPoolOptions&& options = ThreadPoolOptions());
+    explicit ThreadPoolImpl(ThreadPoolOptions options = ThreadPoolOptions());
 
     /**
-     * @brief Move ctor implementation.
-     */
-    ThreadPoolImpl(ThreadPoolImpl&& rhs) noexcept;
+    * @brief Copy ctor implementation.
+    */
+    ThreadPoolImpl(ThreadPoolImpl const&) = delete;
+
+    /**
+    * @brief Copy assignment implementation.
+    */
+    ThreadPoolImpl& operator=(ThreadPoolImpl const& rhs) = delete;
+
+    /**
+    * @brief Move ctor implementation.
+    */
+    ThreadPoolImpl(ThreadPoolImpl&& rhs) noexcept = delete;
+
+    /**
+    * @brief Move assignment implementaion.
+    */
+    ThreadPoolImpl& operator=(ThreadPoolImpl&& rhs) noexcept = delete;
 
     /**
      * @brief ~ThreadPool Stop all workers and destroy thread pool.
      */
     ~ThreadPoolImpl();
-
-    /**
-     * @brief Move assignment implementaion.
-     */
-    ThreadPoolImpl& operator=(ThreadPoolImpl&& rhs) noexcept;
 
     /**
      * @brief post Try post job to thread pool.
@@ -83,6 +95,7 @@ private:
 
     SlottedBag<Queue> m_idle_workers;
     WorkerVector m_workers;
+    Rouser m_rouser;
     std::atomic<size_t> m_next_worker;
     std::atomic<size_t> m_num_busy_waiters;
 };
@@ -91,9 +104,10 @@ private:
 /// Implementation
 
 template <typename Task, template<typename> class Queue>
-inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(ThreadPoolOptions&& options)
+inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(ThreadPoolOptions options)
     : m_idle_workers(options.threadCount())
     , m_workers(options.threadCount())
+    , m_rouser(options.rousePeriod())
     , m_next_worker(0)
     , m_num_busy_waiters(0)
 {
@@ -104,12 +118,8 @@ inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(ThreadPoolOptions&& options)
     // Initialize all worker threads.
     for (size_t i = 0; i < m_workers.size(); ++i)
         m_workers[i]->start(i, &m_workers, &m_idle_workers, &m_num_busy_waiters);
-}
 
-template <typename Task, template<typename> class Queue>
-inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(ThreadPoolImpl<Task, Queue>&& rhs) noexcept
-{
-    *this = rhs;
+    m_rouser.start(&m_workers, &m_idle_workers, &m_num_busy_waiters);
 }
 
 template <typename Task, template<typename> class Queue>
@@ -117,18 +127,8 @@ inline ThreadPoolImpl<Task, Queue>::~ThreadPoolImpl()
 {
     for (auto& worker_ptr : m_workers)
         worker_ptr->stop();
-}
 
-template <typename Task, template<typename> class Queue>
-inline ThreadPoolImpl<Task, Queue>&
-ThreadPoolImpl<Task, Queue>::operator=(ThreadPoolImpl<Task, Queue>&& rhs) noexcept
-{
-    if (this != &rhs)
-    {
-        m_workers = std::move(rhs.m_workers);
-        m_next_worker = rhs.m_next_worker.load();
-    }
-    return *this;
+    m_rouser.stop();
 }
 
 template <typename Task, template<typename> class Queue>

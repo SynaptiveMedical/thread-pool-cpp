@@ -7,6 +7,7 @@
 #include <thread>
 #include <limits>
 #include <mutex>
+#include <chrono>
 #include <condition_variable>
 
 namespace tp
@@ -47,16 +48,26 @@ public:
     * to perform during the busy wait state.
     */
     explicit Worker(ThreadPoolOptions::BusyWaitOptions const& busy_wait_options, size_t queue_size);
+    
+    /**
+    * @brief Copy ctor implementation.
+    */
+    Worker(Worker const&) = delete;
+
+    /**
+    * @brief Copy assignment implementation.
+    */
+    Worker& operator=(Worker const& rhs) = delete;
 
     /**
     * @brief Move ctor implementation.
     */
-    Worker(Worker&& rhs) noexcept;
+    Worker(Worker&& rhs) noexcept = delete;
 
     /**
     * @brief Move assignment implementaion.
     */
-    Worker& operator=(Worker&& rhs) noexcept;
+    Worker& operator=(Worker&& rhs) noexcept = delete;
 
     /**
     * @brief start Create the executing thread and start tasks execution.
@@ -70,7 +81,7 @@ public:
 
     /**
     * @brief stop Stop all worker's thread and stealing activity.
-    * Waits until the executing thread became finished.
+    * Waits until the executing thread becomes finished.
     */
     void stop();
 
@@ -85,11 +96,9 @@ public:
     /**
     * @brief tryGetLocalTask Get one task from this worker queue.
     * @param task Place for the obtained task to be stored.
-    * @param is_strong false if we wish to allow spurious failures 
-    * to occur in interest of performance benefits. Defaults to true.
     * @return true on success.
     */
-    bool tryGetLocalTask(Task& task, bool is_strong = true);
+    bool tryGetLocalTask(Task& task);
 
     /**
     * @brief getWorkerIdForCurrentThread Return worker ID associated with
@@ -109,11 +118,9 @@ private:
     * @brief tryRoundRobinSteal Try stealing a thread from sibling workers in a round-robin fashion.
     * @param task Place for the obtained task to be stored.
     * @param workers Sibling workers for performing round robin work stealing.
-    * @param is_strong false if we wish to allow spurious failures 
-    * to occur in interest of performance benefits. Defaults to true.
     * @return true upon success, false otherwise.
     */
-    bool tryRoundRobinSteal(Task& task, WorkerVector* workers, bool is_strong = true);
+    bool tryRoundRobinSteal(Task& task, WorkerVector* workers);
 
     /**
     * @brief tryHandleTask Try to obtain a work item and process it.
@@ -121,20 +128,20 @@ private:
     * the worker will attempt to perform a round robin steal.
     * @param task Place for the obtained task to be stored.
     * @param workers Sibling workers for performing round robin work stealing.
-    * @param is_strong false if we wish to allow spurious failures 
-    * to occur in interest of performance benefits. Defaults to true.
     * @return true upon success, false otherwise.
     */
-    bool tryHandleTask(Task& task, WorkerVector* workers, bool is_strong = true);
+    bool tryHandleTask(Task& task, WorkerVector* workers);
 
     /**
     * @brief threadFunc Executing thread function.
-    * @param id Worker ID to be associated with this thread.
-    * @param workers Sibling workers for performing round robin work stealing.
+    * @param id Worker ID.
+    * @param workers A pointer to the vector containing sibling workers for performing round robin work stealing.
+    * @param idle_workers A pointer to the slotted bag containing all idle workers.
+    * @param num_busy_waiters A pointer to the atomic busy waiter counter.
+    * @note The parameters passed into this function generally relate to the global thread pool state.
     */
     void threadFunc(size_t id, WorkerVector* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters);
 
-    
     Queue<Task> m_queue;
     std::atomic<bool> m_running_flag;
     std::thread m_thread;
@@ -173,33 +180,9 @@ inline Worker<Task, Queue>::Worker(ThreadPoolOptions::BusyWaitOptions const& bus
 }
 
 template <typename Task, template<typename> class Queue>
-inline Worker<Task, Queue>::Worker(Worker&& rhs) noexcept
-{
-    *this = rhs;
-}
-
-template <typename Task, template<typename> class Queue>
-inline Worker<Task, Queue>& Worker<Task, Queue>::operator=(Worker&& rhs) noexcept
-{
-    if (this != &rhs)
-    {
-        m_queue = std::move(rhs.m_queue);
-        m_running_flag = rhs.m_running_flag.load();
-        m_thread = std::move(rhs.m_thread);
-        m_next_donor = rhs.m_next_donor;
-        m_busy_wait_options = std::move(rhs.m_busy_wait_options);
-        m_idle_mutex = std::move(rhs.m_idle_mutex);
-        m_idle_cv = std::move(rhs.m_idle_cv);
-        m_is_idle = rhs.m_is_idle;
-        m_abort_idle = rhs.m_is_idle;
-    }
-    return *this;
-}
-
-template <typename Task, template<typename> class Queue>
 inline void Worker<Task, Queue>::stop()
 {
-    m_running_flag.store(false);
+    m_running_flag.store(false, std::memory_order_release);
     wake();
     m_thread.join();
 }
@@ -235,17 +218,17 @@ template <typename Task, template<typename> class Queue>
 template <typename Handler>
 inline bool Worker<Task, Queue>::tryPost(Handler&& handler)
 {
-    return m_queue.pushStrong(std::forward<Handler>(handler));
+    return m_queue.push(std::forward<Handler>(handler));
 }
 
 template <typename Task, template<typename> class Queue>
-inline bool Worker<Task, Queue>::tryGetLocalTask(Task& task, bool is_strong)
+inline bool Worker<Task, Queue>::tryGetLocalTask(Task& task)
 {
-    return is_strong ? m_queue.popStrong(task) : m_queue.popWeak(task);
+    return m_queue.pop(task);
 }
 
 template <typename Task, template<typename> class Queue>
-inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector* workers, bool is_strong)
+inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector* workers)
 {
     auto starting_index = m_next_donor;
 
@@ -253,7 +236,7 @@ inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector* wo
     do
     {
         // Don't steal from local queue.
-        if (m_next_donor != *detail::thread_id() && workers->at(m_next_donor)->tryGetLocalTask(task, is_strong))
+        if (m_next_donor != *detail::thread_id() && workers->at(m_next_donor)->tryGetLocalTask(task))
         {
             // Increment before returning so that m_next_donor always points to the worker that has gone the longest
             // without a steal attempt. This helps enforce fairness in the stealing.
@@ -268,13 +251,13 @@ inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector* wo
 }
 
 template <typename Task, template <typename> class Queue>
-bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector* workers, bool is_strong)
+bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector* workers)
 {
-    if (!m_running_flag.load())
+    if (!m_running_flag.load(std::memory_order_acquire))
         throw WorkerStoppedException();
 
     // Prioritize local queue, then try stealing from sibling workers.
-    if (tryGetLocalTask(task, is_strong) || tryRoundRobinSteal(task, workers, is_strong))
+    if (tryGetLocalTask(task) || tryRoundRobinSteal(task, workers))
     {
         try
         {
@@ -305,7 +288,7 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Sl
         {
             // By default, this loop operates in the active state. 
             // We poll for items from our local task queue and try to steal from others.
-            if (tryHandleTask(handler, workers, false)) continue;
+            if (tryHandleTask(handler, workers)) continue;
 
             // We were unable to obtain a task. 
             // We now transition into the busy wait state.
@@ -315,7 +298,7 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Sl
             for (auto i = 0u; i < m_busy_wait_options.numIterations() && !task_found; i++)
             {
                 std::this_thread::sleep_for(m_busy_wait_options.iterationFunction()(i));
-                task_found = tryHandleTask(handler, workers, false);
+                task_found = tryHandleTask(handler, workers);
             }
 
             // If we found a task during our busy wait sequence, we abort it and transition back into the active loop.
@@ -349,7 +332,7 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Sl
                 // A task was indeed posted in the time it took this worker to enter the bag.
                 // We remove the worker from the bag. If the internal state of the bag was not changed,
                 // this means a different thread has already removed this worker from the idle queue, 
-                // and this case will be caught below.
+                // and this case will be caught below. Looping early in this case will cause a loss of synchronization.
                 if (idle_workers->empty(id))
                     continue;
             }

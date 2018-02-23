@@ -117,7 +117,7 @@ inline void SlottedBag<Queue>::fill(size_t id)
     {
     case Slot::State::NotQueued:
         // No race, single producer per slot.
-        while (!m_queue.pushWeak(&m_slots[id])); // Queue should never overflow. Use weak form for performance.
+        while (!m_queue.push(&m_slots[id])); // Queue should never overflow. 
         break;
 
     case Slot::State::QueuedValid:
@@ -141,7 +141,7 @@ template <template<typename> class Queue>
 inline bool SlottedBag<Queue>::tryEmptyAny(size_t& id)
 {
     Slot* slot;
-    while (m_queue.popStrong(slot))
+    while (m_queue.pop(slot))
     {
         // Once a consumer pops a slot, they are the sole controller of that object's membership to the queue
         // (i.e. they are solely responsible for the transition back into the NotQueued state) by virtue of the

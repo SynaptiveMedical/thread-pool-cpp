@@ -66,50 +66,43 @@ public:
     explicit MPMCBoundedQueue(size_t size);
 
     /**
+    * @brief Copy ctor implementation.
+    */
+    MPMCBoundedQueue(MPMCBoundedQueue const&) = delete;
+
+    /**
+    * @brief Copy assignment implementation.
+    */
+    MPMCBoundedQueue& operator=(MPMCBoundedQueue const& rhs) = delete;
+
+    /**
      * @brief Move ctor implementation.
      */
-    MPMCBoundedQueue(MPMCBoundedQueue&& rhs) noexcept;
+    MPMCBoundedQueue(MPMCBoundedQueue&& rhs) noexcept = delete;
 
     /**
      * @brief Move assignment implementaion.
      */
-    MPMCBoundedQueue& operator=(MPMCBoundedQueue&& rhs) noexcept;
+    MPMCBoundedQueue& operator=(MPMCBoundedQueue&& rhs) noexcept = delete;
 
     /**
-     * @brief pushStrong Push data to queue.
-     * @param data Data to be pushed.
-     * @return true on success, if the result is false it is safe to 
-     * infer that the queue is full at the time of the call.
-     */
-    template <typename U>
-    bool pushStrong(U&& data);
-
-    /**
-     * @brief popStrong Pop data from queue.
-     * @param data Place to store popped data.
-     * @return true on sucess, if the result is false it is safe to
-     * infer that the queue is empty at the time of the call.
-     */
-    bool popStrong(T& data);
-
-    /**
-    * @brief pushWeak Push data to queue. May fail spuriously, 
-    * but is more performant than push_strong.
+    * @brief push Push data to queue.
     * @param data Data to be pushed.
-    * @return true on success, if the result is false it is NOT safe to 
-     * infer that the queue is full at the time of the call.
+    * @param is_strong false if we wish to allow spurious failures
+    * to occur in interest of performance benefits.
+    * @return true on success.
     */
     template <typename U>
-    bool pushWeak(U&& data);
+    bool push(U&& data);
 
     /**
-    * @brief popWeak Pop data from queue. May fail spuriously, 
-    * but is more performant than pop_strong.
+    * @brief pop Pop data from queue.
     * @param data Place to store popped data.
-    * @return true on sucess, if the result is false it is NOT safe to
-     * infer that the queue is empty at the time of the call.
+    * @param is_strong false if we wish to allow spurious failures
+    * to occur in interest of performance benefits.
+    * @return true on sucess.
     */
-    bool popWeak(T& data);
+    bool pop(T& data);
 
 private:
     struct Cell
@@ -135,25 +128,6 @@ private:
             return *this;
         }
     };
-
-    /**
-    * @brief push Push data to queue.
-    * @param data Data to be pushed.
-    * @param is_strong false if we wish to allow spurious failures 
-    * to occur in interest of performance benefits.
-    * @return true on success.
-    */
-    template <typename U>
-    bool push(U&& data, bool is_strong);
-
-    /**
-    * @brief pop Pop data from queue.
-    * @param data Place to store popped data.
-    * @param is_strong false if we wish to allow spurious failures 
-    * to occur in interest of performance benefits.
-    * @return true on sucess.
-    */
-    bool pop(T& data, bool is_strong);
 
     typedef char Cacheline[64];
 
@@ -188,53 +162,8 @@ inline MPMCBoundedQueue<T>::MPMCBoundedQueue(size_t size)
 }
 
 template <typename T>
-inline MPMCBoundedQueue<T>::MPMCBoundedQueue(MPMCBoundedQueue&& rhs) noexcept
-{
-    *this = rhs;
-}
-
-template <typename T>
-inline MPMCBoundedQueue<T>& MPMCBoundedQueue<T>::operator=(MPMCBoundedQueue&& rhs) noexcept
-{
-    if (this != &rhs)
-    {
-        m_buffer = std::move(rhs.m_buffer);
-        m_buffer_mask = std::move(rhs.m_buffer_mask);
-        m_enqueue_pos = rhs.m_enqueue_pos.load();
-        m_dequeue_pos = rhs.m_dequeue_pos.load();
-    }
-    return *this;
-}
-
-template <typename T>
 template <typename U>
-inline bool MPMCBoundedQueue<T>::pushStrong(U&& data)
-{
-    return push(std::forward<U>(data), true);
-}
-
-template <typename T>
-inline bool MPMCBoundedQueue<T>::popStrong(T& data)
-{
-    return pop(data, true);
-}
-
-template <typename T>
-template <typename U>
-inline bool MPMCBoundedQueue<T>::pushWeak(U&& data)
-{
-    return push(std::forward<U>(data), false);
-}
-
-template <typename T>
-inline bool MPMCBoundedQueue<T>::popWeak(T& data)
-{
-    return pop(data, false);
-}
-
-template <typename T>
-template <typename U>
-inline bool MPMCBoundedQueue<T>::push(U&& data, bool is_strong)
+inline bool MPMCBoundedQueue<T>::push(U&& data)
 {
     Cell* cell;
     size_t pos = m_enqueue_pos.load(std::memory_order_relaxed);
@@ -248,7 +177,7 @@ inline bool MPMCBoundedQueue<T>::push(U&& data, bool is_strong)
             if(m_enqueue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
                 break;
         }
-        else if(dif < 0 && (!is_strong || m_enqueue_pos.load(std::memory_order_relaxed) - m_buffer_mask - 1 == m_dequeue_pos.load(std::memory_order_relaxed)))
+        else if(dif < 0)
         {
             return false;
         }
@@ -266,7 +195,7 @@ inline bool MPMCBoundedQueue<T>::push(U&& data, bool is_strong)
 }
 
 template <typename T>
-inline bool MPMCBoundedQueue<T>::pop(T& data, bool is_strong)
+inline bool MPMCBoundedQueue<T>::pop(T& data)
 {
     Cell* cell;
     size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
@@ -280,7 +209,7 @@ inline bool MPMCBoundedQueue<T>::pop(T& data, bool is_strong)
             if(m_dequeue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
                 break;
         }
-        else if(dif < 0 && (!is_strong || m_dequeue_pos.load(std::memory_order_relaxed) == m_enqueue_pos.load(std::memory_order_relaxed)))
+        else if(dif < 0)
         {
             return false;
         }

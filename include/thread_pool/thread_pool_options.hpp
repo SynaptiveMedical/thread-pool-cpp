@@ -26,7 +26,7 @@ public:
         * @brief BusyWaitOptions Construct default options for busy wait behaviour.
         */
         BusyWaitOptions(size_t num_iterations = defaultNumIterations()
-            , IterationFunction&& function = defaultIterationFunction());
+            , IterationFunction function = defaultIterationFunction());
 
         /**
         * @brief setNumIterations Set the number of sleeping iterations that take place during
@@ -40,7 +40,7 @@ public:
         * @brief setIterationFunction Set the function to be called upon each sleep iteration.
         * @param function The iteration function to be called.
         */
-        void setIterationFunction(IterationFunction&& function);
+        void setIterationFunction(IterationFunction function);
 
         /**
         * @brief numIterations Return the number of busy wait iterations.
@@ -72,7 +72,8 @@ public:
      */
     ThreadPoolOptions(size_t thread_count = defaultThreadCount()
         , size_t queue_size = defaultQueueSize()
-        , BusyWaitOptions&& busy_wait_options = defaultBusyWaitOptions());
+        , BusyWaitOptions busy_wait_options = defaultBusyWaitOptions()
+        , std::chrono::microseconds rouse_period = defaultRousePeriod());
 
     /**
      * @brief setThreadCount Set thread count.
@@ -91,7 +92,13 @@ public:
     * @brief setBusyWaitOptions Set the parameters relating to worker busy waiting behaviour.
     * @param options The busy wait options.
     */
-    void setBusyWaitOptions(BusyWaitOptions&& options);
+    void setBusyWaitOptions(BusyWaitOptions options);
+
+    /**
+    * @brief setRousePeriod Set the period with which workers are aroused from their idling states.
+    * @param period The afore-mentioned period.
+    */
+    void setRousePeriod(std::chrono::microseconds period);
 
 
     /**
@@ -108,6 +115,11 @@ public:
     * @brief busyWaitOptions Return a reference to the busy wait options.
     */
     BusyWaitOptions const& busyWaitOptions() const;
+
+    /**
+    * @brief rousePeriod Return the rouse period.
+    */
+    std::chrono::microseconds const& rousePeriod() const;
     
     /**
     * @brief defaultThreadCount Obtain the default thread count value.
@@ -124,18 +136,24 @@ public:
     */
     static BusyWaitOptions defaultBusyWaitOptions();
 
+    /**
+    * @brief defaultRousePeriod Obtain the default rouse period.
+    */
+    static std::chrono::microseconds defaultRousePeriod();
+
 
 private:
     size_t m_thread_count;
     size_t m_queue_size;
     BusyWaitOptions m_busy_wait_options;
+    std::chrono::microseconds m_rouse_period;
 };
 
 /// Implementation
 
-inline ThreadPoolOptions::BusyWaitOptions::BusyWaitOptions(size_t num_iterations, ThreadPoolOptions::BusyWaitOptions::IterationFunction&& function)
+inline ThreadPoolOptions::BusyWaitOptions::BusyWaitOptions(size_t num_iterations, ThreadPoolOptions::BusyWaitOptions::IterationFunction function)
     : m_num_iterations(num_iterations)
-    , m_iteration_function(std::forward<ThreadPoolOptions::BusyWaitOptions::IterationFunction>(function))
+    , m_iteration_function(std::move(function))
 {
 }
 
@@ -144,9 +162,9 @@ inline void ThreadPoolOptions::BusyWaitOptions::setNumIterations(size_t count)
     m_num_iterations = std::max<size_t>(0u, count);
 }
 
-inline void ThreadPoolOptions::BusyWaitOptions::setIterationFunction(ThreadPoolOptions::BusyWaitOptions::IterationFunction&& function)
+inline void ThreadPoolOptions::BusyWaitOptions::setIterationFunction(ThreadPoolOptions::BusyWaitOptions::IterationFunction function)
 {
-    m_iteration_function = std::forward<ThreadPoolOptions::BusyWaitOptions::IterationFunction>(function);
+    m_iteration_function = std::move(function);
 }
 
 inline size_t ThreadPoolOptions::BusyWaitOptions::numIterations() const
@@ -171,10 +189,11 @@ inline ThreadPoolOptions::BusyWaitOptions::IterationFunction ThreadPoolOptions::
     return [](size_t i) { return std::chrono::microseconds(static_cast<size_t>(pow(2, i))*1000); };
 }
 
-inline ThreadPoolOptions::ThreadPoolOptions(size_t thread_count, size_t queue_size, BusyWaitOptions&& busy_wait_options)
+inline ThreadPoolOptions::ThreadPoolOptions(size_t thread_count, size_t queue_size, BusyWaitOptions busy_wait_options, std::chrono::microseconds rouse_period)
     : m_thread_count(thread_count)
     , m_queue_size(queue_size)
-    , m_busy_wait_options(busy_wait_options)
+    , m_busy_wait_options(std::move(busy_wait_options))
+    , m_rouse_period(std::move(rouse_period))
 {
 }
 
@@ -188,9 +207,14 @@ inline void ThreadPoolOptions::setQueueSize(size_t size)
     m_queue_size = std::max<size_t>(1u, size);
 }
 
-inline void ThreadPoolOptions::setBusyWaitOptions(BusyWaitOptions&& busy_wait_options)
+inline void ThreadPoolOptions::setBusyWaitOptions(BusyWaitOptions busy_wait_options)
 {
-    m_busy_wait_options = std::forward<BusyWaitOptions>(busy_wait_options);
+    m_busy_wait_options = std::move(busy_wait_options);
+}
+
+inline void ThreadPoolOptions::setRousePeriod(std::chrono::microseconds period)
+{
+    m_rouse_period = std::move(period);
 }
 
 inline size_t ThreadPoolOptions::threadCount() const
@@ -208,6 +232,11 @@ inline ThreadPoolOptions::BusyWaitOptions const& ThreadPoolOptions::busyWaitOpti
     return m_busy_wait_options;
 }
 
+inline std::chrono::microseconds const& ThreadPoolOptions::rousePeriod() const
+{
+    return m_rouse_period;
+}
+
 inline size_t ThreadPoolOptions::defaultThreadCount()
 {
     static const size_t instance = std::max<size_t>(1u, std::thread::hardware_concurrency());
@@ -222,6 +251,11 @@ inline size_t ThreadPoolOptions::defaultQueueSize()
 inline ThreadPoolOptions::BusyWaitOptions ThreadPoolOptions::defaultBusyWaitOptions()
 {
     return ThreadPoolOptions::BusyWaitOptions();
+}
+
+inline std::chrono::microseconds ThreadPoolOptions::defaultRousePeriod()
+{
+    return std::chrono::microseconds(10000);
 }
 
 
