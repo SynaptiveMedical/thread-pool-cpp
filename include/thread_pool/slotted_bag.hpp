@@ -3,6 +3,7 @@
 #include <thread_pool/mpmc_bounded_queue.hpp>
 
 #include <atomic>
+#include <limits>
 
 namespace tp
 {
@@ -89,12 +90,11 @@ public:
 
     /**
     * @brief tryEmptyAny Try to empty any slot in the bag.
-    * @param id The emptied slot id will be stored in this variable upon success.
-    * @return true upon success, false otherwise.
+    * @return a pair containing true upon success along with the id of the emptied slot, false otherwise with an id of UINT_MAX.
     * @note Other exceptions may be thrown if the single-producer-per-slot
     * semantics are violated.
     */
-    bool tryEmptyAny(size_t& id);
+    std::pair<bool, size_t> tryEmptyAny();
 
 private:
     Queue<Slot*> m_queue;
@@ -138,7 +138,7 @@ inline bool SlottedBag<Queue>::empty(size_t id)
 }
 
 template <template<typename> class Queue>
-inline bool SlottedBag<Queue>::tryEmptyAny(size_t& id)
+inline std::pair<bool, size_t> SlottedBag<Queue>::tryEmptyAny()
 {
     Slot* slot;
     while (m_queue.pop(slot))
@@ -153,8 +153,7 @@ inline bool SlottedBag<Queue>::tryEmptyAny(size_t& id)
             throw std::logic_error("State machine logic violation.");
 
         case Slot::State::QueuedValid:
-            id = slot->id;
-            return true;
+            return std::make_pair(true, slot->id);
 
         case Slot::State::QueuedInvalid:
             // Try again.
@@ -163,7 +162,7 @@ inline bool SlottedBag<Queue>::tryEmptyAny(size_t& id)
     }
 
     // Queue empty.
-    return false;
+    return std::make_pair(false, std::numeric_limits<size_t>::max());
 }
 
 }

@@ -103,14 +103,15 @@ inline void Rouser::stop()
 template <typename Task, template<typename> class Queue>
 inline void Rouser::threadFunc(std::vector<std::unique_ptr<Worker<Task, Queue>>>* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters)
 {
-    size_t idle_worker_id;
-
     while (m_running_flag.load(std::memory_order_acquire))
     {
         // Try to wake up a thread if there are no current busy waiters.
         if (num_busy_waiters->load(std::memory_order_acquire) == 0)
-            if (idle_workers->tryEmptyAny(idle_worker_id))
-                workers->at(idle_worker_id)->wake();
+        {
+            auto result = idle_workers->tryEmptyAny();
+            if (result.first)
+                workers->at(result.second)->wake();
+        }
 
         // Sleep.
         std::this_thread::sleep_for(m_rouse_period);

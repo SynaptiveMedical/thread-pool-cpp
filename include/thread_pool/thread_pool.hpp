@@ -135,16 +135,18 @@ template <typename Task, template<typename> class Queue>
 template <typename Handler>
 inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
 {
-    size_t idle_worker_id;
-
     // If there aren't busy waiters, let's see if we have any idling threads. 
     // These incur higher overhead to wake up than the busy waiters.
-    if (m_num_busy_waiters.load(std::memory_order_acquire) == 0 && m_idle_workers.tryEmptyAny(idle_worker_id))
+    if (m_num_busy_waiters.load(std::memory_order_acquire) == 0)
     {
-        auto success = m_workers[idle_worker_id]->tryPost(std::forward<Handler>(handler));
-        m_workers[idle_worker_id]->wake();
+        auto result = m_idle_workers.tryEmptyAny();
+        if (result.first)
+        {
+            auto success = m_workers[result.second]->tryPost(std::forward<Handler>(handler));
+            m_workers[result.second]->wake();
 
-        return success;
+            return success;
+        }
     }
 
     // No idle threads. Our threads are either active or busy waiting
@@ -155,8 +157,11 @@ inline bool ThreadPoolImpl<Task, Queue>::tryPost(Handler&& handler)
     // We have to ensure that at least one thread is active after our submission.
     // Threads could have transitioned into idling under our feet. We need to account for this.
     if (m_num_busy_waiters.load(std::memory_order_acquire) == 0)
-        if (m_idle_workers.tryEmptyAny(idle_worker_id))
-            m_workers[idle_worker_id]->wake();
+    {
+        auto result = m_idle_workers.tryEmptyAny();
+        if (result.first)
+            m_workers[result.second]->wake();
+    }
 
     return true;
 }
