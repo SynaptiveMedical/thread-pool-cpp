@@ -20,19 +20,19 @@ namespace tp
 * with one millisecond delay.
 * @details State Machine:
 *
-*             +---------------+---------------+
-*             |               |               |
-*             v               |               |
+*            +----------------+---------------+
+*            |                |               |
+*            v                |               |
 *       +--------+       +----------+      +------+
 *    +--| Active | ----> | BusyWait | ---> | Idle |
 *    |  +--------+       +----------+      +------+
-*    |      ^
-*    |      |
-*    +------+
+*    |       ^
+*    |       |
+*    +-------+
 *
 */
 template <typename Task, template<typename> class Queue>
-class Worker
+class Worker final
 {
     using WorkerVector = std::vector<std::unique_ptr<Worker<Task, Queue>>>;
     
@@ -44,8 +44,7 @@ public:
     /**
     * @brief Worker Constructor.
     * @param busy_wait_options The busy wait behaviour options.
-    * @param queue_size Length of undelaying task queue.
-    * to perform during the busy wait state.
+    * @param queue_size Length of underlying task queue.
     */
     explicit Worker(ThreadPoolOptions::BusyWaitOptions const& busy_wait_options, size_t queue_size);
     
@@ -61,13 +60,17 @@ public:
 
     /**
     * @brief Move ctor implementation.
+    * @note Be very careful when invoking this while the thread pool is 
+    * active, or in an otherwise undefined state.
     */
-    Worker(Worker&& rhs) noexcept = delete;
+    Worker(Worker&& rhs) noexcept;
 
     /**
     * @brief Move assignment implementaion.
+    * @note Be very careful when invoking this while the thread pool is 
+    * active, or in an otherwise undefined state.
     */
-    Worker& operator=(Worker&& rhs) noexcept = delete;
+    Worker& operator=(Worker&& rhs) noexcept;
 
     /**
     * @brief start Create the executing thread and start tasks execution.
@@ -77,7 +80,7 @@ public:
     * @param num_busy_waiters A pointer to the atomic busy waiter counter.
     * @note The parameters passed into this function generally relate to the global thread pool state.
     */
-    void start(size_t id, WorkerVector* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters);
+    void start(size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
 
     /**
     * @brief stop Stop all worker's thread and stealing activity.
@@ -120,7 +123,7 @@ private:
     * @param workers Sibling workers for performing round robin work stealing.
     * @return true upon success, false otherwise.
     */
-    bool tryRoundRobinSteal(Task& task, WorkerVector* workers);
+    bool tryRoundRobinSteal(Task& task, WorkerVector& workers);
 
     /**
     * @brief tryHandleTask Try to obtain a work item and process it.
@@ -130,7 +133,7 @@ private:
     * @param workers Sibling workers for performing round robin work stealing.
     * @return true upon success, false otherwise.
     */
-    bool tryHandleTask(Task& task, WorkerVector* workers);
+    bool tryHandleTask(Task& task, WorkerVector& workers);
 
     /**
     * @brief threadFunc Executing thread function.
@@ -140,10 +143,11 @@ private:
     * @param num_busy_waiters A pointer to the atomic busy waiter counter.
     * @note The parameters passed into this function generally relate to the global thread pool state.
     */
-    void threadFunc(size_t id, WorkerVector* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters);
+    void threadFunc(size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
 
     Queue<Task> m_queue;
     std::atomic<bool> m_running_flag;
+    std::atomic<bool> m_started_flag;
     std::thread m_thread;
     size_t m_next_donor;
     ThreadPoolOptions::BusyWaitOptions m_busy_wait_options;
@@ -171,7 +175,8 @@ namespace detail
 template <typename Task, template<typename> class Queue>
 inline Worker<Task, Queue>::Worker(ThreadPoolOptions::BusyWaitOptions const& busy_wait_options, size_t queue_size)
     : m_queue(queue_size)
-    , m_running_flag(true)
+    , m_running_flag(false)
+    , m_started_flag(false)
     , m_next_donor(0) // Initialized in threadFunc.
     , m_busy_wait_options(busy_wait_options)
     , m_is_idle(false)
@@ -180,17 +185,51 @@ inline Worker<Task, Queue>::Worker(ThreadPoolOptions::BusyWaitOptions const& bus
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::stop()
+inline Worker<Task, Queue>::Worker(Worker&& rhs) noexcept
 {
-    m_running_flag.store(false, std::memory_order_release);
-    wake();
-    m_thread.join();
+    *this = std::move(rhs);
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::start(size_t id, WorkerVector* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters)
+inline Worker<Task, Queue>& Worker<Task, Queue>::operator=(Worker&& rhs) noexcept
 {
-    m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, workers, idle_workers, num_busy_waiters);
+    if (this != &rhs)
+    {
+        m_queue = std::move(rhs.m_queue);
+        m_running_flag = rhs.m_running_flag.load();
+        m_started_flag = rhs.m_started_flag.load();
+        m_thread = std::move(rhs.m_thread);
+        m_next_donor = rhs.m_next_donor;
+        m_busy_wait_options = std::move(rhs.m_busy_wait_options);
+
+        m_idle_mutex = std::move(rhs.m_idle_mutex);
+        m_idle_cv = std::move(rhs.m_idle_cv);
+
+        m_is_idle = rhs.m_is_idle;
+        m_abort_idle = rhs.m_abort_idle;
+    }
+
+    return *this;
+}
+
+template <typename Task, template<typename> class Queue>
+inline void Worker<Task, Queue>::stop()
+{
+    if (m_running_flag.exchange(false, std::memory_order_acq_rel))
+    {
+        wake();
+        m_thread.join();
+    }
+}
+
+template <typename Task, template<typename> class Queue>
+inline void Worker<Task, Queue>::start(size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
+{
+    if (m_started_flag.exchange(true, std::memory_order_acq_rel))
+        throw std::runtime_error("The Worker has already been started.");
+
+    m_running_flag.store(true, std::memory_order_release);
+    m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, std::ref(id), std::ref(workers), std::ref(idle_workers), std::ref(num_busy_waiters));
 }
 
 template <typename Task, template<typename> class Queue>
@@ -209,6 +248,7 @@ inline void Worker<Task, Queue>::wake()
         m_abort_idle = true;
         notify = m_is_idle;
     }
+
     // Notify outside of lock.
     if (notify)
         m_idle_cv.notify_one();
@@ -228,7 +268,7 @@ inline bool Worker<Task, Queue>::tryGetLocalTask(Task& task)
 }
 
 template <typename Task, template<typename> class Queue>
-inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector* workers)
+inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector& workers)
 {
     auto starting_index = m_next_donor;
 
@@ -236,22 +276,22 @@ inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector* wo
     do
     {
         // Don't steal from local queue.
-        if (m_next_donor != *detail::thread_id() && workers->at(m_next_donor)->tryGetLocalTask(task))
+        if (m_next_donor != *detail::thread_id() && workers[m_next_donor]->tryGetLocalTask(task))
         {
             // Increment before returning so that m_next_donor always points to the worker that has gone the longest
             // without a steal attempt. This helps enforce fairness in the stealing.
-            ++m_next_donor %= workers->size();
+            ++m_next_donor %= workers.size();
             return true;
         }
 
-        ++m_next_donor %= workers->size();
+        ++m_next_donor %= workers.size();
     } while (m_next_donor != starting_index);
 
     return false;
 }
 
 template <typename Task, template <typename> class Queue>
-bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector* workers)
+bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector& workers)
 {
     if (!m_running_flag.load(std::memory_order_acquire))
         throw WorkerStoppedException();
@@ -275,10 +315,10 @@ bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector* workers)
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, SlottedBag<Queue>* idle_workers, std::atomic<size_t>* num_busy_waiters)
+inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
 {
     *detail::thread_id() = id;
-    m_next_donor = (id + 1) % workers->size();
+    m_next_donor = (id + 1) % workers.size();
     Task handler;
     bool task_found = false;
 
@@ -293,7 +333,7 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Sl
             // We were unable to obtain a task. 
             // We now transition into the busy wait state.
             task_found = false;
-            num_busy_waiters->fetch_add(1, std::memory_order_acq_rel);
+            num_busy_waiters.fetch_add(1, std::memory_order_acq_rel);
 
             for (auto i = 0u; i < m_busy_wait_options.numIterations() && !task_found; i++)
             {
@@ -304,7 +344,7 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Sl
             // If we found a task during our busy wait sequence, we abort it and transition back into the active loop.
             if (task_found)
             {
-                num_busy_waiters->fetch_sub(1, std::memory_order_acq_rel);
+                num_busy_waiters.fetch_sub(1, std::memory_order_acq_rel);
                 continue;
             }
 
@@ -317,11 +357,11 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Sl
             }
 
             // We put this worker up for grabs as a recipient to new posts in the thread pool.
-            idle_workers->fill(id);
+            idle_workers.fill(id);
 
             // We need to transition out of the busy wait state after we have submitted ourselves to the idle 
             // worker queue in order to avoid a race.
-            num_busy_waiters->fetch_sub(1, std::memory_order_acq_rel);
+            num_busy_waiters.fetch_sub(1, std::memory_order_acq_rel);
 
             // While we were adding this worker to the idle worker bag, a job may have been posted into this 
             // worker's queue. We need to check for work again before initiating the deep sleep sequence, otherwise
@@ -333,14 +373,14 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector* workers, Sl
                 // We remove the worker from the bag. If the internal state of the bag was not changed,
                 // this means a different thread has already removed this worker from the idle queue, 
                 // and this case will be caught below. Looping early in this case will cause a loss of synchronization.
-                if (idle_workers->empty(id))
+                if (idle_workers.empty(id))
                     continue;
             }
 
             {
                 std::unique_lock<std::mutex> lock(m_idle_mutex);
 
-                // A post has occurred during the sleep sequence! Abort the sleep sequence.
+                // A post has occurred during the initialization of the sleep sequence! Abort the sleep sequence.
                 if (m_abort_idle)
                     continue;
 

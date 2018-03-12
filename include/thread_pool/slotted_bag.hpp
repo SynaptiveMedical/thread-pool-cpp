@@ -72,6 +72,11 @@ public:
     SlottedBag& operator=(SlottedBag&& rhs) = default;
 
     /**
+    * @brief SlottedBag destructor.
+    */
+    virtual ~SlottedBag() = default;
+
+    /**
     * @brief fill Fill the specified slot.
     * @param id The id of the slot to fill.
     * @throws std::runtime_error if the slot is already full.
@@ -90,7 +95,8 @@ public:
 
     /**
     * @brief tryEmptyAny Try to empty any slot in the bag.
-    * @return a pair containing true upon success along with the id of the emptied slot, false otherwise with an id of UINT_MAX.
+    * @return a pair containing true upon success along with the id of the emptied slot, 
+    * false otherwise with an id of std::numeric_limits<size_t>::max().
     * @note Other exceptions may be thrown if the single-producer-per-slot
     * semantics are violated.
     */

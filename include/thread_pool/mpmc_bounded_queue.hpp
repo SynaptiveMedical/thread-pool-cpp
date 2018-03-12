@@ -78,18 +78,21 @@ public:
     /**
      * @brief Move ctor implementation.
      */
-    MPMCBoundedQueue(MPMCBoundedQueue&& rhs) noexcept = delete;
+    MPMCBoundedQueue(MPMCBoundedQueue&& rhs) noexcept;
 
     /**
      * @brief Move assignment implementaion.
      */
-    MPMCBoundedQueue& operator=(MPMCBoundedQueue&& rhs) noexcept = delete;
+    MPMCBoundedQueue& operator=(MPMCBoundedQueue&& rhs) noexcept;
+
+    /**
+    * @brief MPMCBoundedQueue destructor.
+    */
+    virtual ~MPMCBoundedQueue() = default;
 
     /**
     * @brief push Push data to queue.
     * @param data Data to be pushed.
-    * @param is_strong false if we wish to allow spurious failures
-    * to occur in interest of performance benefits.
     * @return true on success.
     */
     template <typename U>
@@ -98,8 +101,6 @@ public:
     /**
     * @brief pop Pop data from queue.
     * @param data Place to store popped data.
-    * @param is_strong false if we wish to allow spurious failures
-    * to occur in interest of performance benefits.
     * @return true on sucess.
     */
     bool pop(T& data);
@@ -159,6 +160,26 @@ inline MPMCBoundedQueue<T>::MPMCBoundedQueue(size_t size)
     {
         m_buffer[i].sequence = i;
     }
+}
+
+template <typename T>
+inline MPMCBoundedQueue<T>::MPMCBoundedQueue(MPMCBoundedQueue&& rhs) noexcept
+{
+    *this = std::move(rhs);
+}
+
+template <typename T>
+inline MPMCBoundedQueue<T>& MPMCBoundedQueue<T>::operator=(MPMCBoundedQueue&& rhs) noexcept
+{
+    if (this != &rhs)
+    {
+        m_buffer = std::move(rhs.m_buffer);
+        m_buffer_mask = rhs.m_buffer_mask;
+        m_enqueue_pos = rhs.m_enqueue_pos.load();
+        m_dequeue_pos = rhs.m_dequeue_pos.load();
+    }
+
+    return *this;
 }
 
 template <typename T>

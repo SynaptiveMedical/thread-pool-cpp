@@ -11,13 +11,13 @@ namespace tp
 /**
  * @brief The ThreadPoolOptions class provides creation options for ThreadPool.
  */
-class ThreadPoolOptions
+class ThreadPoolOptions final
 {
 public:
     /**
     * @brief The BusyWaitOptions class provides worker busy wait behaviour options.
     */
-    class BusyWaitOptions
+    class BusyWaitOptions final
     {
     public:
         using IterationFunction = std::function<std::chrono::microseconds(size_t)>;
