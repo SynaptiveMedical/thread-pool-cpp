@@ -169,10 +169,15 @@ inline bool GenericThreadPool<Task, Queue>::tryPost(Handler&& handler)
         auto result = m_idle_workers.tryEmptyAny();
         if (result.first)
         {
-            auto success = m_workers[result.second]->tryPost(std::forward<Handler>(handler));
-            m_workers[result.second]->wake();
+            if (m_workers[result.second]->tryPost(std::forward<Handler>(handler)))
+            {
+                m_workers[result.second]->wake();
+                return true;
+            }
 
-            return success;
+            // If post is unsuccessful, we need to re-add the worker to the idle worker bag.
+            m_idle_workers.fill(result.second);
+            return false;
         }
     }
 
