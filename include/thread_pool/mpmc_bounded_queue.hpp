@@ -52,7 +52,7 @@ namespace tp
  * http://www.1024cores.net/home/lock-free-algorithms/queues/bounded-mpmc-queue
  */
 template <typename T>
-class MPMCBoundedQueue
+class MPMCBoundedQueue final
 {
     static_assert(
         std::is_move_constructible<T>::value, "Should be of movable type");
@@ -88,7 +88,7 @@ public:
     /**
     * @brief MPMCBoundedQueue destructor.
     */
-    virtual ~MPMCBoundedQueue() = default;
+    ~MPMCBoundedQueue() = default;
 
     /**
     * @brief push Push data to queue.

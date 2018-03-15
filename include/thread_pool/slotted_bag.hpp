@@ -15,7 +15,7 @@ namespace tp
 * The bag supports multiple consumers, and a single producer per slot.
 */
 template <template<typename> class Queue>
-class SlottedBag
+class SlottedBag final
 {
     /**
     * @brief The implementation of a single slot of the bag. Maintains state and id.
@@ -65,16 +65,30 @@ public:
     */
     explicit SlottedBag(size_t size);
 
+    /**
+    * @brief Copy ctor implementation.
+    */
     SlottedBag(SlottedBag& rhs) = delete;
+
+    /**
+    * @brief Copy assignment operator implementation.
+    */
     SlottedBag& operator=(SlottedBag& rhs) = delete;
 
+    /**
+    * @brief Move ctor implementation.
+    */
     SlottedBag(SlottedBag&& rhs) = default;
+
+    /**
+    * @brief Move assignment operator implementation.
+    */
     SlottedBag& operator=(SlottedBag&& rhs) = default;
 
     /**
     * @brief SlottedBag destructor.
     */
-    virtual ~SlottedBag() = default;
+    ~SlottedBag() = default;
 
     /**
     * @brief fill Fill the specified slot.
