@@ -215,11 +215,16 @@ inline Worker<Task, Queue>& Worker<Task, Queue>::operator=(Worker&& rhs) noexcep
 template <typename Task, template<typename> class Queue>
 inline void Worker<Task, Queue>::stop()
 {
+    if (!m_started_flag.load(std::memory_order_acquire))
+        throw std::runtime_error("The Worker has not yet been started.");
+
     if (m_running_flag.exchange(false, std::memory_order_acq_rel))
     {
         wake();
         m_thread.join();
     }
+    else
+        throw std::runtime_error("The Worker has already been stopped.");
 }
 
 template <typename Task, template<typename> class Queue>

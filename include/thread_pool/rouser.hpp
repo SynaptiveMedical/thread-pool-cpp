@@ -124,8 +124,13 @@ inline void Rouser::start(std::vector<std::unique_ptr<Worker<Task, Queue>>>& wor
 
 inline void Rouser::stop()
 {
+    if (!m_started_flag.load(std::memory_order_acquire))
+        throw std::runtime_error("The Rouser has not yet been started.");
+
     if (m_running_flag.exchange(false, std::memory_order_acq_rel))
         m_thread.join();
+    else
+        throw std::runtime_error("The Rouser has already been stopped.");
 }
 
 
