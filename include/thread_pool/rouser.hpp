@@ -55,6 +55,11 @@ public:
     Rouser& operator=(Rouser&& rhs) noexcept;
 
     /**
+    * @brief Destructor implementation.
+    */
+    ~Rouser();
+
+    /**
     * @brief start Create the executing thread and start tasks execution.
     * @param workers A pointer to the vector containing sibling workers for performing round robin work stealing.
     * @param idle_workers A pointer to the slotted bag containing all idle workers.
@@ -110,6 +115,11 @@ inline Rouser& Rouser::operator=(Rouser&& rhs) noexcept
     }
 
     return *this;
+}
+
+inline Rouser::~Rouser()
+{
+    stop();
 }
 
 template <typename Task, template<typename> class Queue>

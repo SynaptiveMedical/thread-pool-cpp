@@ -73,6 +73,11 @@ public:
     Worker& operator=(Worker&& rhs) noexcept;
 
     /**
+    * @brief Destructor implementation.
+    */
+    ~Worker();
+
+    /**
     * @brief start Create the executing thread and start tasks execution.
     * @param id Worker ID.
     * @param workers A pointer to the vector containing sibling workers for performing round robin work stealing.
@@ -165,9 +170,9 @@ private:
 
 namespace detail
 {
-    inline std::atomic<size_t>& thread_id()
+    inline size_t& thread_id()
     {
-        static thread_local std::atomic<size_t> tss_id(std::numeric_limits<size_t>::max());
+        static thread_local size_t tss_id = std::numeric_limits<size_t>::max();
         return tss_id;
     }
 }
@@ -213,6 +218,12 @@ inline Worker<Task, Queue>& Worker<Task, Queue>::operator=(Worker&& rhs) noexcep
 }
 
 template <typename Task, template<typename> class Queue>
+inline Worker<Task, Queue>::~Worker()
+{
+    stop();
+}
+
+template <typename Task, template<typename> class Queue>
 inline void Worker<Task, Queue>::stop()
 {
     if (m_running_flag.exchange(false, std::memory_order_acq_rel))
@@ -235,7 +246,7 @@ inline void Worker<Task, Queue>::start(size_t id, WorkerVector& workers, Slotted
 template <typename Task, template<typename> class Queue>
 inline size_t Worker<Task, Queue>::getWorkerIdForCurrentThread()
 {
-    return detail::thread_id().load(std::memory_order_acquire);
+    return detail::thread_id();
 }
 
 template <typename Task, template<typename> class Queue>
@@ -276,7 +287,7 @@ inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector& wo
     do
     {
         // Don't steal from local queue.
-        if (m_next_donor != detail::thread_id().load(std::memory_order_acquire) && workers[m_next_donor]->tryGetLocalTask(task))
+        if (m_next_donor != detail::thread_id() && workers[m_next_donor]->tryGetLocalTask(task))
         {
             // Increment before returning so that m_next_donor always points to the worker that has gone the longest
             // without a steal attempt. This helps enforce fairness in the stealing.
@@ -317,7 +328,7 @@ bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector& workers)
 template <typename Task, template<typename> class Queue>
 inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
 {
-    detail::thread_id().store(id, std::memory_order_release);
+    detail::thread_id() = id;
     m_next_donor = (id + 1) % workers.size();
     Task handler;
     bool task_found = false;
