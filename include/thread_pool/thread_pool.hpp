@@ -92,10 +92,10 @@ public:
 
 private:
     /**
-    * @brief getWorker Obtain a reference to the local thread's associated worker,
-    * otherwise return the next worker in the round robin.
+    * @brief getWorker Obtain the id of the local thread's associated worker,
+    * otherwise return the next worker id in the round robin.
     */
-    Worker<Task, Queue>& getWorker();
+    size_t getWorkerId();
 
     SlottedBag<Queue> m_idle_workers;
     WorkerVector m_workers;
@@ -169,36 +169,49 @@ inline bool GenericThreadPool<Task, Queue>::tryPost(Handler&& handler)
         auto result = m_idle_workers.tryEmptyAny();
         if (result.first)
         {
-            if (m_workers[result.second]->tryPost(std::forward<Handler>(handler)))
-            {
-                m_workers[result.second]->wake();
-                return true;
-            }
+            auto success = m_workers[result.second]->tryPost(std::forward<Handler>(handler));
+            m_workers[result.second]->wake();
 
-            // If post is unsuccessful, we need to re-add the worker to the idle worker bag.
-            m_idle_workers.fill(result.second);
-            return false;
+            // The above post will only fail if the idle worker's queue is full, which is an extremely 
+            // low probability scenario. In that case, we wake the worker and let it get to work on
+            // processing the items in its queue. We then re-try posting our current task.
+            if (success)
+                return true;
+            else
+                return tryPost(std::forward<Handler>(handler));
         }
     }
-
+    
     // No idle threads. Our threads are either active or busy waiting
     // Either way, submit the work item in a round robin fashion.
-    if (!getWorker().tryPost(std::forward<Handler>(handler)))
-        return false; // Worker's task queue is full.
-
-    // The following section increases the probability that tasks will not be dropped.
-    // This is a soft constraint, the strict task dropping bound is covered by the Rouser
-    // thread's functionality. This code experimentally lowers task response time under
-    // low thread pool utilization without incurring significant performance penalties at
-    // high thread pool utilization.
-    if (m_num_busy_waiters.load(std::memory_order_acquire) == 0)
+    auto id = getWorkerId();
+    auto initialWorkerId = id;
+    do
     {
-        auto result = m_idle_workers.tryEmptyAny();
-        if (result.first)
-            m_workers[result.second]->wake();
-    }
+        if (m_workers[id]->tryPost(std::forward<Handler>(handler)))
+        {
+            // The following section increases the probability that tasks will not be dropped.
+            // This is a soft constraint, the strict task dropping bound is covered by the Rouser
+            // thread's functionality. This code experimentally lowers task response time under
+            // low thread pool utilization without incurring significant performance penalties at
+            // high thread pool utilization.
+            if (m_num_busy_waiters.load(std::memory_order_acquire) == 0)
+            {
+                auto result = m_idle_workers.tryEmptyAny();
+                if (result.first)
+                    m_workers[result.second]->wake();
+            }
 
-    return true;
+            return true;
+        }
+
+        ++id %= m_workers.size();
+    } 
+    while (id != initialWorkerId);
+    
+    // All Queues in our thread pool are full during one whole iteration.
+    // We consider this a posting failure case.
+    return false; 
 }
 
 template <typename Task, template<typename> class Queue>
@@ -211,14 +224,14 @@ inline void GenericThreadPool<Task, Queue>::post(Handler&& handler)
 }
 
 template <typename Task, template<typename> class Queue>
-inline Worker<Task, Queue>& GenericThreadPool<Task, Queue>::getWorker()
+inline size_t GenericThreadPool<Task, Queue>::getWorkerId()
 {
     auto id = Worker<Task, Queue>::getWorkerIdForCurrentThread();
 
     if (id > m_workers.size())
         id = m_next_worker.fetch_add(1, std::memory_order_relaxed) % m_workers.size();
 
-    return *m_workers[id];
+    return id;
 }
 
 }

@@ -85,7 +85,7 @@ public:
     * @param num_busy_waiters A pointer to the atomic busy waiter counter.
     * @note The parameters passed into this function generally relate to the global thread pool state.
     */
-    void start(size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
+    void start(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
 
     /**
     * @brief stop Stop all worker's thread and stealing activity.
@@ -131,14 +131,20 @@ private:
     bool tryRoundRobinSteal(Task& task, WorkerVector& workers);
 
     /**
-    * @brief tryHandleTask Try to obtain a work item and process it.
+    * @brief HandleTask Process a specific task.
+    * @param task The task to be processed.
+    */
+    void handleTask(Task& task);
+
+    /**
+    * @brief tryGetTask Try to obtain a work item.
     * @details This entails attempting to pop an item from the local queue, and if not successful,
     * the worker will attempt to perform a round robin steal.
     * @param task Place for the obtained task to be stored.
     * @param workers Sibling workers for performing round robin work stealing.
     * @return true upon success, false otherwise.
     */
-    bool tryHandleTask(Task& task, WorkerVector& workers);
+    bool tryGetTask(Task& task, WorkerVector& workers);
 
     /**
     * @brief threadFunc Executing thread function.
@@ -148,7 +154,7 @@ private:
     * @param num_busy_waiters A pointer to the atomic busy waiter counter.
     * @note The parameters passed into this function generally relate to the global thread pool state.
     */
-    void threadFunc(size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
+    void threadFunc(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
 
     Queue<Task> m_queue;
     std::atomic<bool> m_running_flag;
@@ -234,13 +240,13 @@ inline void Worker<Task, Queue>::stop()
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::start(size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
+inline void Worker<Task, Queue>::start(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
 {
     if (m_started_flag.exchange(true, std::memory_order_acq_rel))
         throw std::runtime_error("The Worker has already been started.");
 
     m_running_flag.store(true, std::memory_order_release);
-    m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, std::ref(id), std::ref(workers), std::ref(idle_workers), std::ref(num_busy_waiters));
+    m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, std::ref(workers), std::ref(idle_workers), std::ref(num_busy_waiters));
 }
 
 template <typename Task, template<typename> class Queue>
@@ -302,31 +308,30 @@ inline bool Worker<Task, Queue>::tryRoundRobinSteal(Task& task, WorkerVector& wo
 }
 
 template <typename Task, template <typename> class Queue>
-bool Worker<Task, Queue>::tryHandleTask(Task& task, WorkerVector& workers)
+void Worker<Task, Queue>::handleTask(Task& task)
+{
+    try
+    {
+        task();
+    }
+    catch (...)
+    {
+        // Suppress all exceptions.
+    }
+}
+
+template <typename Task, template <typename> class Queue>
+bool Worker<Task, Queue>::tryGetTask(Task& task, WorkerVector& workers)
 {
     if (!m_running_flag.load(std::memory_order_acquire))
         throw WorkerStoppedException();
 
     // Prioritize local queue, then try stealing from sibling workers.
-    if (tryGetLocalTask(task) || tryRoundRobinSteal(task, workers))
-    {
-        try
-        {
-            task();
-        }
-        catch (...)
-        {
-            // Suppress all exceptions.
-        }
-
-        return true;
-    }
-
-    return false;
+    return tryGetLocalTask(task) || tryRoundRobinSteal(task, workers);
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
+inline void Worker<Task, Queue>::threadFunc(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
 {
     detail::thread_id() = id;
     m_next_donor = (id + 1) % workers.size();
@@ -339,7 +344,11 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector& workers, Sl
         {
             // By default, this loop operates in the active state. 
             // We poll for items from our local task queue and try to steal from others.
-            if (tryHandleTask(handler, workers)) continue;
+            if (tryGetTask(handler, workers))
+            {
+                handleTask(handler);
+                continue;
+            };
 
             // We were unable to obtain a task. 
             // We now transition into the busy wait state.
@@ -349,13 +358,14 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector& workers, Sl
             for (auto i = 0u; i < m_busy_wait_options.numIterations() && !task_found; i++)
             {
                 std::this_thread::sleep_for(m_busy_wait_options.iterationFunction()(i));
-                task_found = tryHandleTask(handler, workers);
+                task_found = tryGetTask(handler, workers);
             }
 
             // If we found a task during our busy wait sequence, we abort it and transition back into the active loop.
             if (task_found)
             {
                 num_busy_waiters.fetch_sub(1, std::memory_order_acq_rel);
+                handleTask(handler); // Handle the task body only once we decrement the busy waiting loop.
                 continue;
             }
 
@@ -378,8 +388,9 @@ inline void Worker<Task, Queue>::threadFunc(size_t id, WorkerVector& workers, Sl
             // worker's queue. We need to check for work again before initiating the deep sleep sequence, otherwise
             // the given task may be lost. 
             // Any further posts will flip the m_abort_idle flag to true, and we will catch them later.
-            if (tryHandleTask(handler, workers))
+            if (tryGetTask(handler, workers))
             {
+                handleTask(handler);
                 // A task was indeed posted in the time it took this worker to enter the bag.
                 // We remove the worker from the bag. If the internal state of the bag was not changed,
                 // this means a different thread has already removed this worker from the idle queue, 
