@@ -24,6 +24,16 @@ namespace tp
 */
 class Rouser final
 {
+    /**
+    * @brief State An Enum representing the Rouser thread state.
+    */
+    enum State
+    {
+        Initialized,
+        Running,
+        Stopped
+    };
+
 public:
     /**
     * @brief Worker Constructor.
@@ -86,15 +96,13 @@ private:
     template <typename Task, template<typename> class Queue>
     void threadFunc(std::vector<std::unique_ptr<Worker<Task, Queue>>>& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
 
-    std::atomic<bool> m_running_flag;
-    std::atomic<bool> m_started_flag;
+    std::atomic<State> m_state;
     std::thread m_thread;
     std::chrono::microseconds m_rouse_period;
 };
 
 inline Rouser::Rouser(std::chrono::microseconds rouse_period)
-    : m_running_flag(false)
-    , m_started_flag(false)
+    : m_state(State::Initialized)
     , m_rouse_period(std::move(rouse_period))
 {
 }
@@ -108,8 +116,7 @@ inline Rouser& Rouser::operator=(Rouser&& rhs) noexcept
 {
     if (this != &rhs)
     {
-        m_running_flag = rhs.m_running_flag.load();
-        m_started_flag = rhs.m_started_flag.load();
+        m_state = rhs.m_state.load();
         m_thread = std::move(rhs.m_thread);
         m_rouse_period = std::move(rhs.m_rouse_period);
     }
@@ -125,24 +132,24 @@ inline Rouser::~Rouser()
 template <typename Task, template<typename> class Queue>
 inline void Rouser::start(std::vector<std::unique_ptr<Worker<Task, Queue>>>& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
 {
-    if (m_started_flag.exchange(true, std::memory_order_acq_rel))
-        throw std::runtime_error("The Rouser has already been started.");
+    auto expectedState = State::Initialized;
+    if (!m_state.compare_exchange_strong(expectedState, State::Running, std::memory_order_acq_rel))
+        throw std::runtime_error("Cannot start Rouser: it has previously been started or stopped.");
 
-    m_running_flag.store(true, std::memory_order_release);
     m_thread = std::thread(&Rouser::threadFunc<Task, Queue>, this, std::ref(workers), std::ref(idle_workers), std::ref(num_busy_waiters));
 }
 
 inline void Rouser::stop()
 {
-    if (m_running_flag.exchange(false, std::memory_order_acq_rel))
+    auto expectedState = State::Running;
+    if (m_state.compare_exchange_strong(expectedState, State::Stopped, std::memory_order_acq_rel))
         m_thread.join();
 }
-
 
 template <typename Task, template<typename> class Queue>
 inline void Rouser::threadFunc(std::vector<std::unique_ptr<Worker<Task, Queue>>>& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
 {
-    while (m_running_flag.load(std::memory_order_acquire))
+    while (m_state.load(std::memory_order_acquire) == State::Running)
     {
         // Try to wake up a thread if there are no current busy waiters.
         if (num_busy_waiters.load(std::memory_order_acquire) == 0)

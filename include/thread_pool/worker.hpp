@@ -40,6 +40,16 @@ class Worker final
     {
     };
 
+    /**
+    * @brief State An Enum representing the Rouser thread state.
+    */
+    enum State
+    {
+        Initialized,
+        Running,
+        Stopped
+    };
+
 public:
     /**
     * @brief Worker Constructor.
@@ -157,8 +167,7 @@ private:
     void threadFunc(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
 
     Queue<Task> m_queue;
-    std::atomic<bool> m_running_flag;
-    std::atomic<bool> m_started_flag;
+    std::atomic<State> m_state;
     std::thread m_thread;
     size_t m_next_donor;
     ThreadPoolOptions::BusyWaitOptions m_busy_wait_options;
@@ -186,8 +195,7 @@ namespace detail
 template <typename Task, template<typename> class Queue>
 inline Worker<Task, Queue>::Worker(ThreadPoolOptions::BusyWaitOptions const& busy_wait_options, size_t queue_size)
     : m_queue(queue_size)
-    , m_running_flag(false)
-    , m_started_flag(false)
+    , m_state(State::Initialized)
     , m_next_donor(0) // Initialized in threadFunc.
     , m_busy_wait_options(busy_wait_options)
     , m_is_idle(false)
@@ -207,8 +215,7 @@ inline Worker<Task, Queue>& Worker<Task, Queue>::operator=(Worker&& rhs) noexcep
     if (this != &rhs)
     {
         m_queue = std::move(rhs.m_queue);
-        m_running_flag = rhs.m_running_flag.load();
-        m_started_flag = rhs.m_started_flag.load();
+        m_state = rhs.m_state.load();
         m_thread = std::move(rhs.m_thread);
         m_next_donor = rhs.m_next_donor;
         m_busy_wait_options = std::move(rhs.m_busy_wait_options);
@@ -232,7 +239,8 @@ inline Worker<Task, Queue>::~Worker()
 template <typename Task, template<typename> class Queue>
 inline void Worker<Task, Queue>::stop()
 {
-    if (m_running_flag.exchange(false, std::memory_order_acq_rel))
+    auto expectedState = State::Running;
+    if (m_state.compare_exchange_strong(expectedState, State::Stopped, std::memory_order_acq_rel))
     {
         wake();
         m_thread.join();
@@ -242,10 +250,10 @@ inline void Worker<Task, Queue>::stop()
 template <typename Task, template<typename> class Queue>
 inline void Worker<Task, Queue>::start(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
 {
-    if (m_started_flag.exchange(true, std::memory_order_acq_rel))
-        throw std::runtime_error("The Worker has already been started.");
+    auto expectedState = State::Initialized;
+    if (!m_state.compare_exchange_strong(expectedState, State::Running, std::memory_order_acq_rel))
+        throw std::runtime_error("Cannot start Worker: it has previously been started or stopped.");
 
-    m_running_flag.store(true, std::memory_order_release);
     m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, std::ref(workers), std::ref(idle_workers), std::ref(num_busy_waiters));
 }
 
@@ -323,7 +331,7 @@ void Worker<Task, Queue>::handleTask(Task& task)
 template <typename Task, template <typename> class Queue>
 bool Worker<Task, Queue>::tryGetTask(Task& task, WorkerVector& workers)
 {
-    if (!m_running_flag.load(std::memory_order_acquire))
+    if (m_state.load(std::memory_order_acquire) != State::Running)
         throw WorkerStoppedException();
 
     // Prioritize local queue, then try stealing from sibling workers.
