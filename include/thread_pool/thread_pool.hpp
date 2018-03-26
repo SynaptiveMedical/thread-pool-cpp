@@ -92,6 +92,18 @@ public:
 
 private:
     /**
+    * @brief post Try post job to thread pool.
+    * @param handler Handler to be called from thread pool worker. It has
+    * to be callable as 'handler()'.
+    * @param failedWakeupRetryCap The number of retries to perform when worker
+    * wakeup fails.
+    * @return 'true' on success, false otherwise.
+    * @note All exceptions thrown by handler will be suppressed.
+    */
+    template <typename Handler>
+    bool tryPostImpl(Handler&& handler, size_t failedWakeupRetryCap);
+
+    /**
     * @brief getWorker Obtain the id of the local thread's associated worker,
     * otherwise return the next worker id in the round robin.
     */
@@ -100,6 +112,7 @@ private:
     SlottedBag<Queue> m_idle_workers;
     WorkerVector m_workers;
     Rouser m_rouser;
+    size_t m_failed_wakeup_retry_cap;
     std::atomic<size_t> m_next_worker;
     std::atomic<size_t> m_num_busy_waiters;
 };
@@ -112,6 +125,7 @@ inline GenericThreadPool<Task, Queue>::GenericThreadPool(ThreadPoolOptions optio
     : m_idle_workers(options.threadCount())
     , m_workers(options.threadCount())
     , m_rouser(options.rousePeriod())
+    , m_failed_wakeup_retry_cap(options.failedWakeupRetryCap())
     , m_next_worker(0)
     , m_num_busy_waiters(0)
 {
@@ -140,6 +154,7 @@ inline GenericThreadPool<Task, Queue>& GenericThreadPool<Task, Queue>::operator=
         m_idle_workers = std::move(rhs.m_idle_workers);
         m_workers = std::move(rhs.m_workers);
         m_rouser = std::move(rhs.m_rouser);
+        m_failed_wakeup_retry_cap = rhs.m_failed_wakeup_retry_cap;
         m_next_worker = rhs.m_next_worker.load();
         m_num_busy_waiters = rhs.m_num_busy_waiters.load();
     }
@@ -160,6 +175,22 @@ template <typename Task, template<typename> class Queue>
 template <typename Handler>
 inline bool GenericThreadPool<Task, Queue>::tryPost(Handler&& handler)
 {
+    return tryPostImpl(std::forward<Handler>(handler), m_failed_wakeup_retry_cap);
+}
+
+template <typename Task, template<typename> class Queue>
+template <typename Handler>
+inline void GenericThreadPool<Task, Queue>::post(Handler&& handler)
+{
+    const auto ok = tryPost(std::forward<Handler>(handler));
+    if (!ok)
+        throw std::runtime_error("Thread pool queue is full.");
+}
+
+template <typename Task, template<typename> class Queue>
+template <typename Handler>
+inline bool GenericThreadPool<Task, Queue>::tryPostImpl(Handler&& handler, size_t failedWakeupRetryCap)
+{
     // This section of the code increases the probability that our thread pool
     // is fully utilized (num active workers = argmin(num tasks, num total workers)).
     // If there aren't busy waiters, let's see if we have any idling threads. 
@@ -178,10 +209,15 @@ inline bool GenericThreadPool<Task, Queue>::tryPost(Handler&& handler)
             if (success)
                 return true;
             else
-                return tryPost(std::forward<Handler>(handler));
+            {
+                if (failedWakeupRetryCap == 0)
+                    return false;
+                
+                return tryPostImpl(std::forward<Handler>(handler), failedWakeupRetryCap - 1);
+            }
         }
     }
-    
+
     // No idle threads. Our threads are either active or busy waiting
     // Either way, submit the work item in a round robin fashion.
     auto id = getWorkerId();
@@ -206,21 +242,11 @@ inline bool GenericThreadPool<Task, Queue>::tryPost(Handler&& handler)
         }
 
         ++id %= m_workers.size();
-    } 
-    while (id != initialWorkerId);
-    
+    } while (id != initialWorkerId);
+
     // All Queues in our thread pool are full during one whole iteration.
     // We consider this a posting failure case.
-    return false; 
-}
-
-template <typename Task, template<typename> class Queue>
-template <typename Handler>
-inline void GenericThreadPool<Task, Queue>::post(Handler&& handler)
-{
-    const auto ok = tryPost(std::forward<Handler>(handler));
-    if (!ok)
-        throw std::runtime_error("Thread pool queue is full.");
+    return false;
 }
 
 template <typename Task, template<typename> class Queue>
