@@ -208,13 +208,8 @@ inline bool GenericThreadPool<Task, Queue>::tryPostImpl(Handler&& handler, size_
             // processing the items in its queue. We then re-try posting our current task.
             if (success)
                 return true;
-            else
-            {
-                if (failedWakeupRetryCap == 0)
-                    return false;
-                
+            else if (failedWakeupRetryCap > 0)
                 return tryPostImpl(std::forward<Handler>(handler), failedWakeupRetryCap - 1);
-            }
         }
     }
 
