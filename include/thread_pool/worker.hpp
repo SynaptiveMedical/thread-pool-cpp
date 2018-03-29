@@ -43,7 +43,7 @@ class Worker final
     /**
     * @brief State An Enum representing the Rouser thread state.
     */
-    enum State
+    enum class State
     {
         Initialized,
         Running,
@@ -100,6 +100,8 @@ public:
     /**
     * @brief stop Stop all worker's thread and stealing activity.
     * Waits until the executing thread becomes finished.
+    * @note Stop may only be called once start() has been invoked. 
+    * Repeated successful calls to stop() will be no-ops after the first.
     */
     void stop();
 
@@ -245,6 +247,8 @@ inline void Worker<Task, Queue>::stop()
         wake();
         m_thread.join();
     }
+    else if (expectedState == State::Initialized)
+        throw std::runtime_error("Cannot stop Worker: stop may only be calld after the Worker has been started.");
 }
 
 template <typename Task, template<typename> class Queue>

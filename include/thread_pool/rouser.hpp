@@ -27,7 +27,7 @@ class Rouser final
     /**
     * @brief State An Enum representing the Rouser thread state.
     */
-    enum State
+    enum class State
     {
         Initialized,
         Running,
@@ -71,9 +71,9 @@ public:
 
     /**
     * @brief start Create the executing thread and start tasks execution.
-    * @param workers A pointer to the vector containing sibling workers for performing round robin work stealing.
-    * @param idle_workers A pointer to the slotted bag containing all idle workers.
-    * @param num_busy_waiters A pointer to the atomic busy waiter counter.
+    * @param workers A reference to the vector containing sibling workers for performing round robin work stealing.
+    * @param idle_workers A reference to the slotted bag containing all idle workers.
+    * @param num_busy_waiters A reference to the atomic busy waiter counter.
     * @note The parameters passed into this function generally relate to the global thread pool state.
     */
     template <typename Task, template<typename> class Queue>
@@ -82,6 +82,8 @@ public:
     /**
     * @brief stop Stop all worker's thread and stealing activity.
     * Waits until the executing thread becomes finished.
+    * @note Stop may only be called once start() has been invoked. 
+    * Repeated successful calls to stop() will be no-ops after the first.
     */
     void stop();
 
@@ -89,9 +91,9 @@ private:
 
     /**
     * @brief threadFunc Executing thread function.
-    * @param workers A pointer to the vector containing sibling workers for performing round robin work stealing.
-    * @param idle_workers A pointer to the slotted bag containing all idle workers.
-    * @param num_busy_waiters A pointer to the atomic busy waiter counter.
+    * @param workers A reference to the vector containing sibling workers for performing round robin work stealing.
+    * @param idle_workers A reference to the slotted bag containing all idle workers.
+    * @param num_busy_waiters A reference to the atomic busy waiter counter.
     */
     template <typename Task, template<typename> class Queue>
     void threadFunc(std::vector<std::unique_ptr<Worker<Task, Queue>>>& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
@@ -144,6 +146,8 @@ inline void Rouser::stop()
     auto expectedState = State::Running;
     if (m_state.compare_exchange_strong(expectedState, State::Stopped, std::memory_order_acq_rel))
         m_thread.join();
+    else if (expectedState == State::Initialized)
+        throw std::runtime_error("Cannot stop Rouser: stop may only be calld after the Rouser has been started.");
 }
 
 template <typename Task, template<typename> class Queue>
