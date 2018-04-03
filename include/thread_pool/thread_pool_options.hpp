@@ -72,6 +72,7 @@ public:
      */
     ThreadPoolOptions(size_t thread_count = defaultThreadCount()
         , size_t queue_size = defaultQueueSize()
+        , size_t failed_wakeup_retry_cap = defaultFailedWakeupRetryCap()
         , BusyWaitOptions busy_wait_options = defaultBusyWaitOptions()
         , std::chrono::microseconds rouse_period = defaultRousePeriod());
 
@@ -87,6 +88,11 @@ public:
      */
     void setQueueSize(size_t size);
 
+    /**
+    * @brief setFailedWakeupRetryCap Set retry cap when a worker wakeup fails.
+    * @param cap The retry cap.
+    */
+    void setFailedWakeupRetryCap(size_t cap);
 
     /**
     * @brief setBusyWaitOptions Set the parameters relating to worker busy waiting behaviour.
@@ -112,6 +118,11 @@ public:
     size_t queueSize() const;
 
     /**
+    * @brief failedWakeupRetryCap Return the retry cap when a worker wakeup fails.
+    */
+    size_t failedWakeupRetryCap() const;
+
+    /**
     * @brief busyWaitOptions Return a reference to the busy wait options.
     */
     BusyWaitOptions const& busyWaitOptions() const;
@@ -132,6 +143,11 @@ public:
     static size_t defaultQueueSize();
 
     /**
+    * @brief defaultFailedWakeupRetryCap Obtain the default retry cap when a worker wakeup fails.
+    */
+    static size_t defaultFailedWakeupRetryCap();
+
+    /**
     * @brief defaultBusyWaitOptions Obtain the default busy wait options.
     */
     static BusyWaitOptions defaultBusyWaitOptions();
@@ -145,6 +161,7 @@ public:
 private:
     size_t m_thread_count;
     size_t m_queue_size;
+    size_t m_failed_wakeup_retry_cap;
     BusyWaitOptions m_busy_wait_options;
     std::chrono::microseconds m_rouse_period;
 };
@@ -189,9 +206,10 @@ inline ThreadPoolOptions::BusyWaitOptions::IterationFunction ThreadPoolOptions::
     return [](size_t i) { return std::chrono::microseconds(static_cast<size_t>(pow(2, i))*1000); };
 }
 
-inline ThreadPoolOptions::ThreadPoolOptions(size_t thread_count, size_t queue_size, BusyWaitOptions busy_wait_options, std::chrono::microseconds rouse_period)
+inline ThreadPoolOptions::ThreadPoolOptions(size_t thread_count, size_t queue_size, size_t failed_wakeup_retry_cap, BusyWaitOptions busy_wait_options, std::chrono::microseconds rouse_period)
     : m_thread_count(thread_count)
     , m_queue_size(queue_size)
+    , m_failed_wakeup_retry_cap(failed_wakeup_retry_cap)
     , m_busy_wait_options(std::move(busy_wait_options))
     , m_rouse_period(std::move(rouse_period))
 {
@@ -205,6 +223,11 @@ inline void ThreadPoolOptions::setThreadCount(size_t count)
 inline void ThreadPoolOptions::setQueueSize(size_t size)
 {
     m_queue_size = std::max<size_t>(1u, size);
+}
+
+inline void ThreadPoolOptions::setFailedWakeupRetryCap(size_t cap)
+{
+    m_failed_wakeup_retry_cap = std::max<size_t>(1u, cap);
 }
 
 inline void ThreadPoolOptions::setBusyWaitOptions(BusyWaitOptions busy_wait_options)
@@ -227,6 +250,11 @@ inline size_t ThreadPoolOptions::queueSize() const
     return m_queue_size;
 }
 
+inline size_t ThreadPoolOptions::failedWakeupRetryCap() const
+{
+    return m_failed_wakeup_retry_cap;
+}
+
 inline ThreadPoolOptions::BusyWaitOptions const& ThreadPoolOptions::busyWaitOptions() const
 {
     return m_busy_wait_options;
@@ -246,6 +274,11 @@ inline size_t ThreadPoolOptions::defaultThreadCount()
 inline size_t ThreadPoolOptions::defaultQueueSize()
 {
     return 1024;
+}
+
+inline size_t ThreadPoolOptions::defaultFailedWakeupRetryCap()
+{
+    return 5;
 }
 
 inline ThreadPoolOptions::BusyWaitOptions ThreadPoolOptions::defaultBusyWaitOptions()
