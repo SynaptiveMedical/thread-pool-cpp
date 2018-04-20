@@ -4,6 +4,7 @@
 #include <thread_pool/mpmc_bounded_queue.hpp>
 #include <thread_pool/slotted_bag.hpp>
 #include <thread_pool/thread_pool_options.hpp>
+#include <thread_pool/thread_pool_state.hpp>
 #include <thread_pool/worker.hpp>
 #include <thread_pool/rouser.hpp>
 
@@ -53,15 +54,11 @@ public:
 
     /**
     * @brief Move ctor implementation.
-    * @note Be very careful when invoking this while the thread pool is 
-    * active, or in an otherwise undefined state.
     */
     GenericThreadPool(GenericThreadPool&& rhs) noexcept;
 
     /**
     * @brief Move assignment implementaion.v
-    * @note Be very careful when invoking this while the thread pool is 
-    * active, or in an otherwise undefined state.
     */
     GenericThreadPool& operator=(GenericThreadPool&& rhs) noexcept;
 
@@ -109,12 +106,9 @@ private:
     */
     size_t getWorkerId();
 
-    SlottedBag<Queue> m_idle_workers;
-    WorkerVector m_workers;
-    Rouser m_rouser;
     size_t m_failed_wakeup_retry_cap;
     std::atomic<size_t> m_next_worker;
-    std::atomic<size_t> m_num_busy_waiters;
+    std::shared_ptr<ThreadPoolState<Task, Queue>> m_state;
 };
 
 
@@ -122,22 +116,19 @@ private:
 
 template <typename Task, template<typename> class Queue>
 inline GenericThreadPool<Task, Queue>::GenericThreadPool(ThreadPoolOptions options)
-    : m_idle_workers(options.threadCount())
-    , m_workers(options.threadCount())
-    , m_rouser(options.rousePeriod())
-    , m_failed_wakeup_retry_cap(options.failedWakeupRetryCap())
+    : m_failed_wakeup_retry_cap(options.failedWakeupRetryCap())
     , m_next_worker(0)
-    , m_num_busy_waiters(0)
+    , m_state(ThreadPoolState<Task, Queue>::create(options))
 {
     // Instatiate all workers.
-    for (auto it = m_workers.begin(); it != m_workers.end(); ++it)
+    for (auto it = m_state->workers().begin(); it != m_state->workers().end(); ++it)
         it->reset(new Worker<Task, Queue>(options.busyWaitOptions(), options.queueSize()));
 
     // Initialize all worker threads.
-    for (size_t i = 0; i < m_workers.size(); ++i)
-        m_workers[i]->start(i, m_workers, m_idle_workers, m_num_busy_waiters);
+    for (size_t i = 0; i <  m_state->workers().size(); ++i)
+        m_state->workers()[i]->start(i, m_state);
 
-    m_rouser.start(m_workers, m_idle_workers, m_num_busy_waiters);
+    m_state->rouser().start(m_state);
 }
 
 template <typename Task, template<typename> class Queue>
@@ -151,12 +142,9 @@ inline GenericThreadPool<Task, Queue>& GenericThreadPool<Task, Queue>::operator=
 {
     if (this != &rhs)
     {
-        m_idle_workers = std::move(rhs.m_idle_workers);
-        m_workers = std::move(rhs.m_workers);
-        m_rouser = std::move(rhs.m_rouser);
         m_failed_wakeup_retry_cap = rhs.m_failed_wakeup_retry_cap;
         m_next_worker = rhs.m_next_worker.load();
-        m_num_busy_waiters = rhs.m_num_busy_waiters.load();
+        m_state = rhs.m_state;
     }
 
     return *this;
@@ -165,9 +153,9 @@ inline GenericThreadPool<Task, Queue>& GenericThreadPool<Task, Queue>::operator=
 template <typename Task, template<typename> class Queue>
 inline GenericThreadPool<Task, Queue>::~GenericThreadPool()
 {
-    m_rouser.stop();
+    m_state->rouser().stop();
 
-    for (auto& worker_ptr : m_workers)
+    for (auto& worker_ptr : m_state->workers())
         worker_ptr->stop();
 }
 
@@ -195,13 +183,13 @@ inline bool GenericThreadPool<Task, Queue>::tryPostImpl(Handler&& handler, size_
     // is fully utilized (num active workers = argmin(num tasks, num total workers)).
     // If there aren't busy waiters, let's see if we have any idling threads. 
     // These incur higher overhead to wake up than the busy waiters.
-    if (m_num_busy_waiters.load(std::memory_order_acquire) == 0)
+    if (m_state->numBusyWaiters().load(std::memory_order_acquire) == 0)
     {
-        auto result = m_idle_workers.tryEmptyAny();
+        auto result = m_state->idleWorkers().tryEmptyAny();
         if (result.first)
         {
-            auto success = m_workers[result.second]->tryPost(std::forward<Handler>(handler));
-            m_workers[result.second]->wake();
+            auto success = m_state->workers()[result.second]->tryPost(std::forward<Handler>(handler));
+            m_state->workers()[result.second]->wake();
 
             // The above post will only fail if the idle worker's queue is full, which is an extremely 
             // low probability scenario. In that case, we wake the worker and let it get to work on
@@ -219,24 +207,24 @@ inline bool GenericThreadPool<Task, Queue>::tryPostImpl(Handler&& handler, size_
     auto initialWorkerId = id;
     do
     {
-        if (m_workers[id]->tryPost(std::forward<Handler>(handler)))
+        if (m_state->workers()[id]->tryPost(std::forward<Handler>(handler)))
         {
             // The following section increases the probability that tasks will not be dropped.
             // This is a soft constraint, the strict task dropping bound is covered by the Rouser
             // thread's functionality. This code experimentally lowers task response time under
             // low thread pool utilization without incurring significant performance penalties at
             // high thread pool utilization.
-            if (m_num_busy_waiters.load(std::memory_order_acquire) == 0)
+            if (m_state->numBusyWaiters().load(std::memory_order_acquire) == 0)
             {
-                auto result = m_idle_workers.tryEmptyAny();
+                auto result = m_state->idleWorkers().tryEmptyAny();
                 if (result.first)
-                    m_workers[result.second]->wake();
+                    m_state->workers()[result.second]->wake();
             }
 
             return true;
         }
 
-        ++id %= m_workers.size();
+        ++id %= m_state->workers().size();
     } while (id != initialWorkerId);
 
     // All Queues in our thread pool are full during one whole iteration.
@@ -249,8 +237,8 @@ inline size_t GenericThreadPool<Task, Queue>::getWorkerId()
 {
     auto id = Worker<Task, Queue>::getWorkerIdForCurrentThread();
 
-    if (id > m_workers.size())
-        id = m_next_worker.fetch_add(1, std::memory_order_relaxed) % m_workers.size();
+    if (id >  m_state->workers().size())
+        id = m_next_worker.fetch_add(1, std::memory_order_relaxed) % m_state->workers().size();
 
     return id;
 }

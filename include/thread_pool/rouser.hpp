@@ -2,6 +2,7 @@
 
 #include <thread_pool/slotted_bag.hpp>
 #include <thread_pool/thread_pool_options.hpp>
+#include <thread_pool/thread_pool_state.hpp>
 #include <thread_pool/worker.hpp>
 
 #include <atomic>
@@ -52,17 +53,13 @@ public:
 
     /**
     * @brief Move ctor implementation.
-    * @note Be very careful when invoking this while the thread pool is 
-    * active, or in an otherwise undefined state.
     */
-    Rouser(Rouser&& rhs) noexcept;
+    Rouser(Rouser&& rhs) = delete;
 
     /**
     * @brief Move assignment implementaion.
-    * @note Be very careful when invoking this while the thread pool is 
-    * active, or in an otherwise undefined state.
     */
-    Rouser& operator=(Rouser&& rhs) noexcept;
+    Rouser& operator=(Rouser&& rhs) = delete;
 
     /**
     * @brief Destructor implementation.
@@ -71,13 +68,11 @@ public:
 
     /**
     * @brief start Create the executing thread and start tasks execution.
-    * @param workers A reference to the vector containing sibling workers for performing round robin work stealing.
-    * @param idle_workers A reference to the slotted bag containing all idle workers.
-    * @param num_busy_waiters A reference to the atomic busy waiter counter.
+    * @param state A pointer to thread pool's shared state.
     * @note The parameters passed into this function generally relate to the global thread pool state.
     */
     template <typename Task, template<typename> class Queue>
-    void start(std::vector<std::unique_ptr<Worker<Task, Queue>>>& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
+    void start(std::shared_ptr<ThreadPoolState<Task, Queue>> state);
 
     /**
     * @brief stop Stop all worker's thread and stealing activity.
@@ -91,12 +86,10 @@ private:
 
     /**
     * @brief threadFunc Executing thread function.
-    * @param workers A reference to the vector containing sibling workers for performing round robin work stealing.
-    * @param idle_workers A reference to the slotted bag containing all idle workers.
-    * @param num_busy_waiters A reference to the atomic busy waiter counter.
+    * @param state A pointer to thread pool's shared state.
     */
     template <typename Task, template<typename> class Queue>
-    void threadFunc(std::vector<std::unique_ptr<Worker<Task, Queue>>>& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
+    void threadFunc(std::shared_ptr<ThreadPoolState<Task, Queue>> shared_state);
 
     std::atomic<State> m_state;
     std::thread m_thread;
@@ -109,36 +102,19 @@ inline Rouser::Rouser(std::chrono::microseconds rouse_period)
 {
 }
 
-inline Rouser::Rouser(Rouser&& rhs) noexcept
-{
-    *this = std::move(rhs);
-}
-
-inline Rouser& Rouser::operator=(Rouser&& rhs) noexcept
-{
-    if (this != &rhs)
-    {
-        m_state = rhs.m_state.load();
-        m_thread = std::move(rhs.m_thread);
-        m_rouse_period = std::move(rhs.m_rouse_period);
-    }
-
-    return *this;
-}
-
 inline Rouser::~Rouser()
 {
     stop();
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Rouser::start(std::vector<std::unique_ptr<Worker<Task, Queue>>>& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
+inline void Rouser::start(std::shared_ptr<ThreadPoolState<Task, Queue>> state)
 {
     auto expectedState = State::Initialized;
     if (!m_state.compare_exchange_strong(expectedState, State::Running, std::memory_order_acq_rel))
         throw std::runtime_error("Cannot start Rouser: it has previously been started or stopped.");
 
-    m_thread = std::thread(&Rouser::threadFunc<Task, Queue>, this, std::ref(workers), std::ref(idle_workers), std::ref(num_busy_waiters));
+    m_thread = std::thread(&Rouser::threadFunc<Task, Queue>, this, std::move(state));
 }
 
 inline void Rouser::stop()
@@ -151,16 +127,16 @@ inline void Rouser::stop()
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Rouser::threadFunc(std::vector<std::unique_ptr<Worker<Task, Queue>>>& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
+inline void Rouser::threadFunc(std::shared_ptr<ThreadPoolState<Task, Queue>> shared_state)
 {
     while (m_state.load(std::memory_order_acquire) == State::Running)
     {
         // Try to wake up a thread if there are no current busy waiters.
-        if (num_busy_waiters.load(std::memory_order_acquire) == 0)
+        if (shared_state->numBusyWaiters().load(std::memory_order_acquire) == 0)
         {
-            auto result = idle_workers.tryEmptyAny();
+            auto result = shared_state->idleWorkers().tryEmptyAny();
             if (result.first)
-                workers[result.second]->wake();
+                shared_state->workers()[result.second]->wake();
         }
 
         // Sleep.
