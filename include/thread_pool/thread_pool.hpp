@@ -108,6 +108,7 @@ private:
 
     size_t m_failed_wakeup_retry_cap;
     std::atomic<size_t> m_next_worker;
+    std::shared_ptr<Rouser> m_rouser;
     std::shared_ptr<ThreadPoolState<Task, Queue>> m_state;
 };
 
@@ -118,6 +119,7 @@ template <typename Task, template<typename> class Queue>
 inline GenericThreadPool<Task, Queue>::GenericThreadPool(ThreadPoolOptions options)
     : m_failed_wakeup_retry_cap(options.failedWakeupRetryCap())
     , m_next_worker(0)
+    , m_rouser(std::make_shared<Rouser>(options.rousePeriod()))
     , m_state(ThreadPoolState<Task, Queue>::create(options))
 {
     // Instatiate all workers.
@@ -128,7 +130,7 @@ inline GenericThreadPool<Task, Queue>::GenericThreadPool(ThreadPoolOptions optio
     for (size_t i = 0; i <  m_state->workers().size(); ++i)
         m_state->workers()[i]->start(i, m_state);
 
-    m_state->rouser().start(m_state);
+    m_rouser->start(m_state);
 }
 
 template <typename Task, template<typename> class Queue>
@@ -153,7 +155,7 @@ inline GenericThreadPool<Task, Queue>& GenericThreadPool<Task, Queue>::operator=
 template <typename Task, template<typename> class Queue>
 inline GenericThreadPool<Task, Queue>::~GenericThreadPool()
 {
-    m_state->rouser().stop();
+    m_rouser->stop();
 
     for (auto& worker_ptr : m_state->workers())
         worker_ptr->stop();

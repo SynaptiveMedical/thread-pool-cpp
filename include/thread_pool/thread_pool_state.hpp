@@ -10,8 +10,6 @@
 namespace tp
 {
 
-class Rouser;
-
 template <typename Task, template<typename> class Queue>
 class Worker;
 
@@ -37,11 +35,6 @@ public:
     * @brief workers Obtain the worker list.
     */
     WorkerVector& workers();
-
-    /**
-    * @brief rouser Obtain the rouser.
-    */
-    Rouser& rouser();
 
     /**
     * @brief numBusyWaiters Obtain the busy waiter count.
@@ -85,7 +78,6 @@ private:
 
     SlottedBag<Queue> m_idle_workers;
     WorkerVector m_workers;
-    Rouser m_rouser;
     std::atomic<size_t> m_num_busy_waiters;
 };
 
@@ -119,12 +111,6 @@ inline typename ThreadPoolState<Task, Queue>::WorkerVector& ThreadPoolState<Task
 }
 
 template <typename Task, template<typename> class Queue>
-inline Rouser& ThreadPoolState<Task, Queue>::rouser()
-{
-    return m_rouser;
-}
-
-template <typename Task, template<typename> class Queue>
 inline std::atomic<size_t>& ThreadPoolState<Task, Queue>::numBusyWaiters()
 {
     return m_num_busy_waiters;
@@ -134,7 +120,6 @@ template <typename Task, template<typename> class Queue>
 inline ThreadPoolState<Task, Queue>::ThreadPoolState(ThreadPoolOptions const& options)
     : m_idle_workers(options.threadCount())
     , m_workers(options.threadCount())
-    , m_rouser(options.rousePeriod())
     , m_num_busy_waiters(0)
 {
 }
