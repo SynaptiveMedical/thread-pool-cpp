@@ -224,7 +224,7 @@ inline void Worker<Task, Queue>::start(const size_t id, std::shared_ptr<ThreadPo
     if (!m_state.compare_exchange_strong(expectedState, State::Running, std::memory_order_acq_rel))
         throw std::runtime_error("Cannot start Worker: it has previously been started or stopped.");
 
-    m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, std::move(state));
+    m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, state);
 }
 
 template <typename Task, template<typename> class Queue>

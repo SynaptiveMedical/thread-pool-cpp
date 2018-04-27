@@ -110,7 +110,6 @@ private:
     std::atomic<size_t> m_next_worker;
     std::shared_ptr<Rouser> m_rouser;
     std::shared_ptr<ThreadPoolState<Task, Queue>> m_state;
-    std::atomic<bool> m_moved;
 };
 
 
@@ -122,7 +121,6 @@ inline GenericThreadPool<Task, Queue>::GenericThreadPool(ThreadPoolOptions optio
     , m_next_worker(0)
     , m_rouser(std::make_shared<Rouser>(options.rousePeriod()))
     , m_state(ThreadPoolState<Task, Queue>::create(options))
-    , m_moved(false)
 {
     // Instatiate all workers.
     for (auto it = m_state->workers().begin(); it != m_state->workers().end(); ++it)
@@ -148,11 +146,8 @@ inline GenericThreadPool<Task, Queue>& GenericThreadPool<Task, Queue>::operator=
     {
         m_failed_wakeup_retry_cap = rhs.m_failed_wakeup_retry_cap;
         m_next_worker = rhs.m_next_worker.load();
-        m_rouser = rhs.m_rouser;
-        rhs.m_rouser = nullptr;
-        m_state = rhs.m_state;
-        rhs.m_state = nullptr;
-        rhs.m_moved.store(true, std::memory_order_release);
+        m_rouser = std::move(rhs.m_rouser);
+        m_state = std::move(rhs.m_state);
     }
 
     return *this;
@@ -161,7 +156,7 @@ inline GenericThreadPool<Task, Queue>& GenericThreadPool<Task, Queue>::operator=
 template <typename Task, template<typename> class Queue>
 inline GenericThreadPool<Task, Queue>::~GenericThreadPool()
 {
-    if (m_moved.load(std::memory_order_acquire))
+    if (!m_state || !m_rouser)
         return;
 
     m_rouser->stop();
@@ -174,7 +169,7 @@ template <typename Task, template<typename> class Queue>
 template <typename Handler>
 inline bool GenericThreadPool<Task, Queue>::tryPost(Handler&& handler)
 {
-    if (m_moved.load(std::memory_order_acquire))
+    if (!m_state || !m_rouser)
         throw std::runtime_error("Attempting to invoke post on a moved object.");
 
     return tryPostImpl(std::forward<Handler>(handler), m_failed_wakeup_retry_cap);
