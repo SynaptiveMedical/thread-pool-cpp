@@ -2,6 +2,7 @@
 
 #include <thread_pool/slotted_bag.hpp>
 #include <thread_pool/thread_pool_options.hpp>
+#include <thread_pool/thread_pool_state.hpp>
 
 #include <atomic>
 #include <thread>
@@ -70,17 +71,13 @@ public:
 
     /**
     * @brief Move ctor implementation.
-    * @note Be very careful when invoking this while the thread pool is 
-    * active, or in an otherwise undefined state.
     */
-    Worker(Worker&& rhs) noexcept;
+    Worker(Worker&& rhs) = delete;
 
     /**
     * @brief Move assignment implementaion.
-    * @note Be very careful when invoking this while the thread pool is 
-    * active, or in an otherwise undefined state.
     */
-    Worker& operator=(Worker&& rhs) noexcept;
+    Worker& operator=(Worker&& rhs) = delete;
 
     /**
     * @brief Destructor implementation.
@@ -90,12 +87,10 @@ public:
     /**
     * @brief start Create the executing thread and start tasks execution.
     * @param id Worker ID.
-    * @param workers A pointer to the vector containing sibling workers for performing round robin work stealing.
-    * @param idle_workers A pointer to the slotted bag containing all idle workers.
-    * @param num_busy_waiters A pointer to the atomic busy waiter counter.
+    * @param state A pointer to thread pool's shared state.
     * @note The parameters passed into this function generally relate to the global thread pool state.
     */
-    void start(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
+    void start(const size_t id, std::shared_ptr<ThreadPoolState<Task, Queue>> state);
 
     /**
     * @brief stop Stop all worker's thread and stealing activity.
@@ -161,12 +156,10 @@ private:
     /**
     * @brief threadFunc Executing thread function.
     * @param id Worker ID.
-    * @param workers A pointer to the vector containing sibling workers for performing round robin work stealing.
-    * @param idle_workers A pointer to the slotted bag containing all idle workers.
-    * @param num_busy_waiters A pointer to the atomic busy waiter counter.
+    * @param state A pointer to thread pool's shared state.
     * @note The parameters passed into this function generally relate to the global thread pool state.
     */
-    void threadFunc(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters);
+    void threadFunc(const size_t id, std::shared_ptr<ThreadPoolState<Task, Queue>> state);
 
     Queue<Task> m_queue;
     std::atomic<State> m_state;
@@ -206,33 +199,6 @@ inline Worker<Task, Queue>::Worker(ThreadPoolOptions::BusyWaitOptions const& bus
 }
 
 template <typename Task, template<typename> class Queue>
-inline Worker<Task, Queue>::Worker(Worker&& rhs) noexcept
-{
-    *this = std::move(rhs);
-}
-
-template <typename Task, template<typename> class Queue>
-inline Worker<Task, Queue>& Worker<Task, Queue>::operator=(Worker&& rhs) noexcept
-{
-    if (this != &rhs)
-    {
-        m_queue = std::move(rhs.m_queue);
-        m_state = rhs.m_state.load();
-        m_thread = std::move(rhs.m_thread);
-        m_next_donor = rhs.m_next_donor;
-        m_busy_wait_options = std::move(rhs.m_busy_wait_options);
-
-        m_idle_mutex = std::move(rhs.m_idle_mutex);
-        m_idle_cv = std::move(rhs.m_idle_cv);
-
-        m_is_idle = rhs.m_is_idle;
-        m_abort_idle = rhs.m_abort_idle;
-    }
-
-    return *this;
-}
-
-template <typename Task, template<typename> class Queue>
 inline Worker<Task, Queue>::~Worker()
 {
     stop();
@@ -252,13 +218,13 @@ inline void Worker<Task, Queue>::stop()
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::start(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
+inline void Worker<Task, Queue>::start(const size_t id, std::shared_ptr<ThreadPoolState<Task, Queue>> state)
 {
     auto expectedState = State::Initialized;
     if (!m_state.compare_exchange_strong(expectedState, State::Running, std::memory_order_acq_rel))
         throw std::runtime_error("Cannot start Worker: it has previously been started or stopped.");
 
-    m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, std::ref(workers), std::ref(idle_workers), std::ref(num_busy_waiters));
+    m_thread = std::thread(&Worker<Task, Queue>::threadFunc, this, id, state);
 }
 
 template <typename Task, template<typename> class Queue>
@@ -343,10 +309,10 @@ bool Worker<Task, Queue>::tryGetTask(Task& task, WorkerVector& workers)
 }
 
 template <typename Task, template<typename> class Queue>
-inline void Worker<Task, Queue>::threadFunc(const size_t id, WorkerVector& workers, SlottedBag<Queue>& idle_workers, std::atomic<size_t>& num_busy_waiters)
+inline void Worker<Task, Queue>::threadFunc(const size_t id, std::shared_ptr<ThreadPoolState<Task, Queue>> state)
 {
     detail::thread_id() = id;
-    m_next_donor = (id + 1) % workers.size();
+    m_next_donor = (id + 1) % state->workers().size();
     Task handler;
     bool task_found = false;
 
@@ -356,7 +322,7 @@ inline void Worker<Task, Queue>::threadFunc(const size_t id, WorkerVector& worke
         {
             // By default, this loop operates in the active state. 
             // We poll for items from our local task queue and try to steal from others.
-            if (tryGetTask(handler, workers))
+            if (tryGetTask(handler, state->workers()))
             {
                 handleTask(handler);
                 continue;
@@ -365,18 +331,18 @@ inline void Worker<Task, Queue>::threadFunc(const size_t id, WorkerVector& worke
             // We were unable to obtain a task. 
             // We now transition into the busy wait state.
             task_found = false;
-            num_busy_waiters.fetch_add(1, std::memory_order_acq_rel);
+            state->numBusyWaiters().fetch_add(1, std::memory_order_acq_rel);
 
             for (auto i = 0u; i < m_busy_wait_options.numIterations() && !task_found; i++)
             {
                 std::this_thread::sleep_for(m_busy_wait_options.iterationFunction()(i));
-                task_found = tryGetTask(handler, workers);
+                task_found = tryGetTask(handler, state->workers());
             }
 
             // If we found a task during our busy wait sequence, we abort it and transition back into the active loop.
             if (task_found)
             {
-                num_busy_waiters.fetch_sub(1, std::memory_order_acq_rel);
+                state->numBusyWaiters().fetch_sub(1, std::memory_order_acq_rel);
                 handleTask(handler); // Handle the task body only once we decrement the busy waiting loop.
                 continue;
             }
@@ -390,24 +356,24 @@ inline void Worker<Task, Queue>::threadFunc(const size_t id, WorkerVector& worke
             }
 
             // We put this worker up for grabs as a recipient to new posts in the thread pool.
-            idle_workers.fill(id);
+            state->idleWorkers().fill(id);
 
             // We need to transition out of the busy wait state after we have submitted ourselves to the idle 
             // worker queue in order to avoid a race.
-            num_busy_waiters.fetch_sub(1, std::memory_order_acq_rel);
+            state->numBusyWaiters().fetch_sub(1, std::memory_order_acq_rel);
 
             // While we were adding this worker to the idle worker bag, a job may have been posted into this 
             // worker's queue. We need to check for work again before initiating the deep sleep sequence, otherwise
             // the given task may be lost. 
             // Any further posts will flip the m_abort_idle flag to true, and we will catch them later.
-            if (tryGetTask(handler, workers))
+            if (tryGetTask(handler, state->workers()))
             {
                 handleTask(handler);
                 // A task was indeed posted in the time it took this worker to enter the bag.
                 // We remove the worker from the bag. If the internal state of the bag was not changed,
                 // this means a different thread has already removed this worker from the idle queue, 
                 // and this case will be caught below. Looping early in this case will cause a loss of synchronization.
-                if (idle_workers.empty(id))
+                if (state->idleWorkers().empty(id))
                     continue;
             }
 
